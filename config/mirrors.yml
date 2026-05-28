@@ -1,0 +1,7 @@
+mirrors:
+  - source: docker.io/library/nginx:latest
+    target: localhost:5000/library/nginx:latest
+
+settings:
+  check_interval_minutes: 30
+  registry_url: http://registry:5000

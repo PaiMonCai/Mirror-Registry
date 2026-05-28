@@ -1,0 +1,43 @@
+services:
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data/registry:/var/lib/registry
+      - ./config/registry-config.yml:/etc/docker/registry/config.yml
+
+  panel:
+    image: "ghcr.io/paimoncai/mirror-registry-panel:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: /config/mirrors.yml
+      STATE_PATH: /data/sync-state.json
+      LOG_PATH: /data/sync.log
+      TRIGGER_PATH: /data/.trigger
+      REGISTRY_URL: http://registry:5000
+      PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/config          # mirrors.yml（读写）
+      - ./data:/data              # sync-state.json + sync.log + .trigger
+    depends_on:
+      - registry
+
+  sync:
+    image: "ghcr.io/paimoncai/mirror-registry-sync:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
+    restart: unless-stopped
+    environment:
+      CONFIG_PATH: /config/mirrors.yml
+      STATE_PATH: /data/sync-state.json
+      LOG_PATH: /data/sync.log
+      TRIGGER_PATH: /data/.trigger
+      COMMAND_TIMEOUT_SECONDS: 900
+    volumes:
+      - ./config:/config:ro       # mirrors.yml（只读）
+      - ./data:/data              # sync-state.json + sync.log + .trigger
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - registry

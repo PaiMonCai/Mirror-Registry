@@ -1,0 +1,3 @@
+-r panel/requirements.txt
+-r sync/requirements.txt
+pytest==8.2.2

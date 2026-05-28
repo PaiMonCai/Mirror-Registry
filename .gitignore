@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+
+# Local development docs
+mirror-registry-dev-doc*.md
+.env
+
+data/*
+!data/.gitkeep
+!data/registry/
+data/registry/*
+!data/registry/.gitkeep
