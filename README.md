@@ -16,8 +16,9 @@
 
 ```powershell
 Copy-Item .env.example .env
-docker compose pull && docker compose up -d
-
+docker compose pull
+docker compose up -d
+docker compose ps
 ```
 
 启动后打开 `http://localhost:8080`。
@@ -27,6 +28,9 @@ docker compose pull && docker compose up -d
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
+SYNC_RETRY_COUNT=2
+SKOPEO_COPY_ALL=1
+SKOPEO_DEST_TLS_VERIFY=false
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` 默认是 `latest`。如果要锁定正式版本，可以改成指定 tag：
@@ -36,6 +40,14 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 管理面板会把令牌保存在浏览器 local storage 中，并在新增、修改、删除、触发同步等写操作时通过 Bearer token 发送。
+
+## v2 运维能力
+
+- `sync` 使用 `skopeo copy` 同步镜像，不再依赖宿主机 Docker CLI，也不再挂载 `/var/run/docker.sock`。
+- 运行数据默认写入 SQLite：`data/mirror-registry.db`。
+- 面板提供「同步任务」页，展示每轮同步任务和每个镜像的结果。
+- 面板提供「验证诊断」页，检查 Registry、配置目录、数据目录、SQLite 和 sync 心跳。
+- UI 默认浅色主题，深色主题和写操作令牌都保存在浏览器 local storage。
 
 ## 本地开发
 
@@ -77,7 +89,7 @@ docker compose config
 docker compose -f docker-compose.dev.yml config
 ```
 
-`sync` 服务运行时需要 Docker CLI、`skopeo`，并且需要访问 `/var/run/docker.sock`。
+`sync` 服务运行时需要 `skopeo`。默认目标 Registry 是 Compose 内部服务 `registry:5000`；配置里使用 `localhost:5000/...` 时，sync 会在复制时自动改写为内部地址。
 
 ## 开发镜像
 

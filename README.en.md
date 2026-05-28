@@ -28,6 +28,9 @@ The default write API token is `change-me`. Set a real token in `.env` before ex
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
+SYNC_RETRY_COUNT=2
+SKOPEO_COPY_ALL=1
+SKOPEO_DEST_TLS_VERIFY=false
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` defaults to `latest`. To pin a release, set it to a specific tag:
@@ -37,6 +40,14 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 The panel stores the token in browser local storage and sends it as a Bearer token for write operations.
+
+## v2 Operations
+
+- `sync` uses `skopeo copy` and no longer depends on host Docker CLI or `/var/run/docker.sock`.
+- Runtime data is stored in SQLite by default: `data/mirror-registry.db`.
+- The panel has a sync runs view for each run and per-image result.
+- The panel has a diagnostics view for Registry, config, data, SQLite, and sync heartbeat checks.
+- The UI defaults to a light operations theme. Dark theme and write token preferences are stored in browser local storage.
 
 ## Local Development
 
@@ -78,7 +89,7 @@ docker compose config
 docker compose -f docker-compose.dev.yml config
 ```
 
-`sync` needs Docker CLI, `skopeo`, and access to `/var/run/docker.sock` at runtime.
+`sync` needs `skopeo` at runtime. The default target Registry inside Compose is `registry:5000`; when config uses `localhost:5000/...`, sync rewrites that target to the internal address for copy operations.
 
 ## Development Images
 

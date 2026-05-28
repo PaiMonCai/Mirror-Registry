@@ -4,586 +4,455 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Mirror Registry</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
+  *, *::before, *::after { box-sizing: border-box; }
   :root {
-    --bg:       #0a0c10;
-    --surface:  #111318;
-    --card:     #161b24;
-    --border:   #1e2530;
-    --border2:  #2a3340;
-    --text:     #c9d1d9;
-    --muted:    #5a6478;
-    --accent:   #4fa8d5;
-    --green:    #3fb950;
-    --yellow:   #d29922;
-    --red:      #f85149;
-    --mono:     'IBM Plex Mono', monospace;
-    --sans:     'IBM Plex Sans', sans-serif;
+    color-scheme: light;
+    --bg: #f5f7fb;
+    --surface: #ffffff;
+    --surface-2: #eef2f7;
+    --text: #162033;
+    --muted: #667085;
+    --border: #d9e1ec;
+    --line: #e8edf4;
+    --accent: #0f766e;
+    --accent-2: #1d4ed8;
+    --ok: #15803d;
+    --warn: #b45309;
+    --err: #b42318;
+    --shadow: 0 12px 28px rgba(21, 31, 48, 0.08);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: Inter, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
   }
-
-  html, body { height: 100%; }
-
+  body.theme-dark {
+    color-scheme: dark;
+    --bg: #111827;
+    --surface: #1f2937;
+    --surface-2: #273449;
+    --text: #f8fafc;
+    --muted: #aab4c2;
+    --border: #384459;
+    --line: #303b4f;
+    --accent: #2dd4bf;
+    --accent-2: #93c5fd;
+    --ok: #4ade80;
+    --warn: #fbbf24;
+    --err: #fb7185;
+    --shadow: none;
+  }
   body {
+    margin: 0;
+    min-height: 100vh;
     background: var(--bg);
     color: var(--text);
     font-family: var(--sans);
     font-size: 14px;
-    line-height: 1.6;
-    min-height: 100vh;
+    line-height: 1.5;
   }
-
-  /* ── Layout ── */
-  .shell {
+  button, input { font: inherit; }
+  .layout {
+    min-height: 100vh;
     display: grid;
-    grid-template-rows: 52px 1fr;
-    min-height: 100vh;
+    grid-template-columns: 240px 1fr;
   }
-
-  /* ── Header ── */
-  header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 0 24px;
-    border-bottom: 1px solid var(--border);
+  aside {
     background: var(--surface);
-    position: sticky; top: 0; z-index: 100;
+    border-right: 1px solid var(--border);
+    padding: 20px 16px;
+    position: sticky;
+    top: 0;
+    height: 100vh;
   }
-  .logo {
-    font-family: var(--mono);
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--accent);
-    letter-spacing: 0.05em;
-    white-space: nowrap;
-  }
-  .logo span { color: var(--muted); }
-  .nav {
+  .brand {
     display: flex;
-    gap: 2px;
-    margin-left: 20px;
-    flex: 1;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 24px;
   }
-  .nav-btn {
-    font-family: var(--mono);
+  .brand-title {
+    font-weight: 700;
+    font-size: 17px;
+    letter-spacing: 0;
+  }
+  .brand-sub {
+    color: var(--muted);
     font-size: 12px;
-    color: var(--muted);
-    background: none;
-    border: none;
-    padding: 6px 14px;
-    border-radius: 4px;
-    cursor: pointer;
-    transition: color 0.15s, background 0.15s;
-    letter-spacing: 0.03em;
   }
-  .nav-btn:hover { color: var(--text); background: var(--border); }
-  .nav-btn.active { color: var(--accent); background: rgba(79,168,213,0.1); }
-
-  .sync-status {
-    font-family: var(--mono);
-    font-size: 11px;
-    color: var(--muted);
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-  }
-  .pulse {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--green);
-  }
-  .pulse.syncing {
-    background: var(--yellow);
-    animation: blink 0.8s infinite;
-  }
-  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
-
-  .auth-token {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 260px;
-  }
-  .auth-token input {
-    height: 30px;
-    font-size: 11px;
-  }
-
-  /* ── Main ── */
-  main {
-    padding: 28px 28px;
-    max-width: 1100px;
+  .nav { display: grid; gap: 6px; }
+  .nav-btn {
     width: 100%;
-    margin: 0 auto;
+    min-height: 38px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 8px;
+    text-align: left;
+    padding: 8px 10px;
+    cursor: pointer;
   }
-
-  /* ── Views ── */
-  .view { display: none; animation: fadein 0.2s ease; }
-  .view.active { display: block; }
-  @keyframes fadein { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:none} }
-
-  /* ── Stat cards ── */
-  .stats-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    gap: 14px;
-    margin-bottom: 28px;
+  .nav-btn:hover { background: var(--surface-2); color: var(--text); }
+  .nav-btn.active {
+    background: rgba(15, 118, 110, 0.12);
+    border-color: rgba(15, 118, 110, 0.25);
+    color: var(--accent);
+    font-weight: 650;
   }
-  .stat-card {
-    background: var(--card);
+  .side-panel {
+    margin-top: 20px;
+    padding: 12px;
     border: 1px solid var(--border);
     border-radius: 8px;
-    padding: 18px 20px;
+    background: var(--surface-2);
   }
-  .stat-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
+  .token-row { display: grid; gap: 8px; }
+  .token-row label, .field label {
     color: var(--muted);
-    margin-bottom: 6px;
-  }
-  .stat-value {
-    font-family: var(--mono);
-    font-size: 28px;
+    font-size: 12px;
     font-weight: 600;
-    color: var(--text);
-    line-height: 1;
   }
-  .stat-value.accent { color: var(--accent); }
-  .stat-value.green  { color: var(--green); }
-  .stat-value.yellow { color: var(--yellow); }
-
-  /* ── Section header ── */
+  main {
+    min-width: 0;
+    padding: 24px 28px 36px;
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+  .page-title { margin: 0; font-size: 24px; line-height: 1.2; }
+  .page-subtitle { margin-top: 4px; color: var(--muted); }
+  .top-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .view { display: none; }
+  .view.active { display: block; }
+  .grid { display: grid; gap: 14px; }
+  .stats { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
+  .two-col { grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr); align-items: start; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+  }
+  .card-pad { padding: 16px; }
+  .metric-label { color: var(--muted); font-size: 12px; font-weight: 650; }
+  .metric-value { margin-top: 6px; font-size: 28px; font-weight: 750; line-height: 1; }
+  .metric-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
   .section-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 14px;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
   }
-  .section-title {
-    font-family: var(--mono);
-    font-size: 11px;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-
-  /* ── Buttons ── */
-  .btn {
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 6px 14px;
-    border-radius: 5px;
-    border: 1px solid var(--border2);
-    background: var(--card);
-    color: var(--text);
-    cursor: pointer;
-    transition: all 0.15s;
-    white-space: nowrap;
-  }
-  .btn:hover { border-color: var(--accent); color: var(--accent); }
-  .btn.primary {
-    background: var(--accent);
-    color: #000;
-    border-color: var(--accent);
-    font-weight: 600;
-  }
-  .btn.primary:hover { background: #6ec0e8; }
-  .btn.danger { color: var(--red); border-color: var(--border2); }
-  .btn.danger:hover { background: rgba(248,81,73,0.1); border-color: var(--red); }
-  .btn.sm { font-size: 11px; padding: 4px 10px; }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
-  /* ── Table ── */
-  .table-wrap {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    overflow: hidden;
-  }
+  .section-title { font-weight: 700; }
+  .table-wrap { overflow-x: auto; }
   table {
     width: 100%;
     border-collapse: collapse;
-    font-family: var(--mono);
-    font-size: 12px;
+    min-width: 720px;
   }
-  thead th {
-    background: var(--surface);
-    color: var(--muted);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
+  th, td {
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
     text-align: left;
-    padding: 10px 16px;
-    border-bottom: 1px solid var(--border);
-    font-weight: 500;
   }
-  tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
-  tbody tr:last-child { border-bottom: none; }
-  tbody tr:hover { background: rgba(255,255,255,0.02); }
-  td { padding: 11px 16px; vertical-align: middle; }
-  .td-source { color: var(--accent); max-width: 300px; word-break: break-all; }
-  .td-target { color: var(--muted); max-width: 280px; word-break: break-all; }
-  .td-digest { color: var(--muted); font-size: 11px; }
-  .td-actions { display: flex; gap: 6px; }
-
+  th {
+    color: var(--muted);
+    background: var(--surface-2);
+    font-size: 12px;
+    font-weight: 700;
+  }
+  tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: var(--mono); }
+  .ref { word-break: break-all; font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted); }
   .badge {
     display: inline-flex;
     align-items: center;
-    gap: 4px;
-    font-family: var(--mono);
-    font-size: 10px;
-    padding: 2px 8px;
-    border-radius: 3px;
-    letter-spacing: 0.05em;
-  }
-  .badge.synced  { background: rgba(63,185,80,0.12);  color: var(--green);  border: 1px solid rgba(63,185,80,0.25); }
-  .badge.pending { background: rgba(210,153,34,0.12); color: var(--yellow); border: 1px solid rgba(210,153,34,0.25); }
-  .badge.dot { width:5px; height:5px; border-radius:50%; background:currentColor; display:inline-block; }
-
-  /* ── Form ── */
-  .form-card {
-    background: var(--card);
+    min-height: 24px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    font-size: 12px;
     border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 20px 22px;
-    margin-top: 20px;
+    background: var(--surface-2);
+    color: var(--muted);
+    white-space: nowrap;
   }
-  .form-row {
+  .badge.ok { color: var(--ok); border-color: rgba(21, 128, 61, 0.3); background: rgba(21, 128, 61, 0.08); }
+  .badge.warn { color: var(--warn); border-color: rgba(180, 83, 9, 0.3); background: rgba(180, 83, 9, 0.08); }
+  .badge.err { color: var(--err); border-color: rgba(180, 35, 24, 0.3); background: rgba(180, 35, 24, 0.08); }
+  .btn {
+    min-height: 34px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 7px 12px;
+    cursor: pointer;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 700; }
+  .btn.danger { color: var(--err); }
+  .btn.sm { min-height: 28px; padding: 4px 9px; font-size: 12px; }
+  input {
+    width: 100%;
+    min-height: 36px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    padding: 8px 10px;
+    outline: none;
+  }
+  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14); }
+  .form-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr auto;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     gap: 10px;
     align-items: end;
   }
-  .form-group { display: flex; flex-direction: column; gap: 5px; }
-  .form-label {
-    font-family: var(--mono);
-    font-size: 10px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--muted);
-  }
-  input[type="text"], input[type="number"] {
+  .field { display: grid; gap: 6px; }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .empty { color: var(--muted); text-align: center; padding: 28px; }
+  .log-box {
+    height: 470px;
+    overflow: auto;
+    padding: 14px;
+    background: var(--surface-2);
     font-family: var(--mono);
     font-size: 12px;
-    background: var(--surface);
-    border: 1px solid var(--border2);
-    border-radius: 5px;
-    color: var(--text);
-    padding: 8px 12px;
-    outline: none;
-    transition: border-color 0.15s;
-    width: 100%;
+    border-radius: 0 0 8px 8px;
   }
-  input:focus { border-color: var(--accent); }
-  input::placeholder { color: var(--muted); }
-
-  /* ── Log viewer ── */
-  .log-box {
-    background: #060809;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-    height: 480px;
-    overflow-y: auto;
-    font-family: var(--mono);
-    font-size: 11.5px;
-    line-height: 1.65;
-    scroll-behavior: smooth;
-  }
-  .log-line { white-space: pre-wrap; word-break: break-all; }
-  .log-line.info    { color: #7ec8e3; }
-  .log-line.warn    { color: var(--yellow); }
-  .log-line.error   { color: var(--red); }
-  .log-line.success { color: var(--green); }
-  .log-line.default { color: #5a6478; }
-
-  /* ── Images grid ── */
+  .log-line { white-space: pre-wrap; word-break: break-all; margin: 0 0 5px; }
+  .line-error { color: var(--err); }
+  .line-warn { color: var(--warn); }
+  .line-info { color: var(--accent-2); }
   .image-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
     gap: 12px;
+    padding: 14px;
   }
-  .image-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 16px;
-  }
-  .image-repo {
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--accent);
-    margin-bottom: 8px;
-    word-break: break-all;
-  }
-  .tag-list { display: flex; flex-wrap: wrap; gap: 5px; }
-  .tag {
-    font-family: var(--mono);
-    font-size: 10px;
-    background: var(--surface);
-    border: 1px solid var(--border2);
-    color: var(--muted);
-    padding: 2px 8px;
-    border-radius: 3px;
-  }
-
-  /* ── Toast ── */
+  .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
   #toast {
     position: fixed;
-    bottom: 24px;
-    right: 24px;
-    font-family: var(--mono);
-    font-size: 12px;
-    padding: 10px 18px;
-    border-radius: 6px;
-    background: var(--card);
-    border: 1px solid var(--border2);
-    color: var(--text);
+    right: 22px;
+    bottom: 22px;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 11px 14px;
+    border-radius: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow);
     opacity: 0;
     transform: translateY(8px);
-    transition: all 0.2s;
+    transition: 0.18s ease;
     pointer-events: none;
-    z-index: 999;
-    max-width: 320px;
+    z-index: 20;
   }
   #toast.show { opacity: 1; transform: none; }
-  #toast.ok  { border-color: var(--green); color: var(--green); }
-  #toast.err { border-color: var(--red);   color: var(--red); }
-
-  /* ── Empty state ── */
-  .empty {
-    text-align: center;
-    padding: 48px 0;
-    font-family: var(--mono);
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  /* ── Loading ── */
-  .spinner {
-    display: inline-block;
-    width: 12px; height: 12px;
-    border: 2px solid var(--border2);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.6s linear infinite;
-    vertical-align: middle;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  @media (max-width: 640px) {
-    .form-row { grid-template-columns: 1fr; }
-    main { padding: 16px; }
-    .stat-value { font-size: 22px; }
-    header { align-items: stretch; flex-direction: column; height: auto; padding: 12px 16px; }
-    .nav { margin-left: 0; flex-wrap: wrap; }
-    .sync-status { margin-left: 0; }
-    .auth-token { min-width: 0; width: 100%; }
+  #toast.err { border-color: var(--err); color: var(--err); }
+  #toast.ok { border-color: var(--ok); color: var(--ok); }
+  @media (max-width: 920px) {
+    .layout { grid-template-columns: 1fr; }
+    aside { position: static; height: auto; }
+    .stats, .two-col, .form-grid { grid-template-columns: 1fr; }
+    main { padding: 18px 14px 28px; }
+    .topbar { align-items: flex-start; flex-direction: column; }
   }
 </style>
 </head>
 <body>
-<div class="shell">
-
-  <!-- Header -->
-  <header>
-    <div class="logo">mirror<span>/</span>registry</div>
+<div class="layout">
+  <aside>
+    <div class="brand">
+      <div>
+        <div class="brand-title">Mirror Registry</div>
+        <div class="brand-sub">单机镜像缓存和同步</div>
+      </div>
+      <button class="btn sm" onclick="toggleTheme()" id="themeBtn" title="切换主题">主题</button>
+    </div>
     <nav class="nav">
-      <button class="nav-btn active" onclick="switchView('dashboard')">概览</button>
-      <button class="nav-btn" onclick="switchView('mirrors')">镜像管理</button>
-      <button class="nav-btn" onclick="switchView('images')">仓库镜像</button>
-      <button class="nav-btn" onclick="switchView('logs')">日志</button>
+      <button class="nav-btn active" data-view="dashboard" onclick="switchView('dashboard')">概览</button>
+      <button class="nav-btn" data-view="runs" onclick="switchView('runs')">同步任务</button>
+      <button class="nav-btn" data-view="mirrors" onclick="switchView('mirrors')">镜像配置</button>
+      <button class="nav-btn" data-view="images" onclick="switchView('images')">本地仓库</button>
+      <button class="nav-btn" data-view="diagnostics" onclick="switchView('diagnostics')">验证诊断</button>
+      <button class="nav-btn" data-view="logs" onclick="switchView('logs')">日志 / 事件</button>
+      <button class="nav-btn" data-view="settings" onclick="switchView('settings')">设置</button>
     </nav>
-    <div class="sync-status" id="syncStatus">
-      <span class="pulse" id="syncPulse"></span>
-      <span id="syncLabel">就绪</span>
+    <div class="side-panel token-row">
+      <label for="tokenInput">写操作令牌</label>
+      <input type="text" id="tokenInput" placeholder="PANEL_TOKEN">
+      <button class="btn primary" onclick="saveToken()">保存令牌</button>
+      <div class="muted" style="font-size:12px">令牌保存在浏览器 localStorage。</div>
     </div>
-    <div class="auth-token">
-      <input type="text" id="tokenInput" placeholder="写操作令牌">
-      <button class="btn sm" onclick="saveToken()">保存</button>
-    </div>
-  </header>
+  </aside>
 
-  <!-- Main -->
   <main>
-
-    <!-- ── 概览 ── -->
-    <div class="view active" id="view-dashboard">
-      <div class="stats-row" id="statsRow">
-        <div class="stat-card">
-          <div class="stat-label">总镜像数</div>
-          <div class="stat-value accent" id="statTotal">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">已同步</div>
-          <div class="stat-value green" id="statSynced">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">待同步</div>
-          <div class="stat-value yellow" id="statPending">—</div>
-        </div>
-        <div class="stat-card">
-          <div class="stat-label">检查间隔</div>
-          <div class="stat-value" id="statInterval">—<span style="font-size:14px;color:var(--muted)"> min</span></div>
-        </div>
+    <div class="topbar">
+      <div>
+        <h1 class="page-title" id="pageTitle">概览</h1>
+        <div class="page-subtitle" id="pageSubtitle">查看同步状态、任务和环境健康度。</div>
       </div>
-
-      <div class="section-head">
-        <div class="section-title">快捷操作</div>
-      </div>
-      <div style="display:flex;gap:10px;flex-wrap:wrap">
-        <button class="btn primary" onclick="triggerSync()" id="syncBtn">▶ 立即同步</button>
-        <button class="btn" onclick="switchView('mirrors')">+ 添加镜像</button>
-        <button class="btn" onclick="switchView('logs')">查看日志</button>
-      </div>
-
-      <div style="margin-top:28px">
-        <div class="section-head">
-          <div class="section-title">镜像状态一览</div>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>SOURCE</th>
-                <th>状态</th>
-                <th>DIGEST</th>
-              </tr>
-            </thead>
-            <tbody id="dashMirrorTable">
-              <tr><td colspan="3" class="empty">加载中…</td></tr>
-            </tbody>
-          </table>
-        </div>
+      <div class="top-actions">
+        <span class="badge" id="engineBadge">engine: —</span>
+        <span class="badge" id="syncBadge">就绪</span>
+        <button class="btn primary" onclick="triggerSync()">立即同步全部</button>
       </div>
     </div>
 
-    <!-- ── 镜像管理 ── -->
-    <div class="view" id="view-mirrors">
-      <div class="section-head">
-        <div class="section-title">同步列表</div>
-        <button class="btn primary" onclick="triggerSync()" id="syncBtn2">▶ 立即同步全部</button>
+    <section class="view active" id="view-dashboard">
+      <div class="grid stats">
+        <div class="card card-pad"><div class="metric-label">总镜像数</div><div class="metric-value" id="statTotal">—</div><div class="metric-note">配置中的镜像条目</div></div>
+        <div class="card card-pad"><div class="metric-label">已同步</div><div class="metric-value" id="statSynced">—</div><div class="metric-note">已有 digest 记录</div></div>
+        <div class="card card-pad"><div class="metric-label">待同步</div><div class="metric-value" id="statPending">—</div><div class="metric-note">等待首次成功同步</div></div>
+        <div class="card card-pad"><div class="metric-label">检查间隔</div><div class="metric-value" id="statInterval">—</div><div class="metric-note">分钟</div></div>
       </div>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>SOURCE</th>
-              <th>TARGET</th>
-              <th>DIGEST</th>
-              <th>状态</th>
-              <th>操作</th>
-            </tr>
-          </thead>
-          <tbody id="mirrorTable">
-            <tr><td colspan="6" class="empty">加载中…</td></tr>
-          </tbody>
-        </table>
+      <div class="grid two-col" style="margin-top:14px">
+        <div class="card">
+          <div class="section-head"><div class="section-title">镜像状态</div><button class="btn sm" onclick="loadMirrors()">刷新</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>状态</th><th>最近结果</th></tr></thead><tbody id="dashMirrorTable"><tr><td colspan="4" class="empty">加载中</td></tr></tbody></table></div>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">调度状态</div>
+          <div style="display:grid;gap:10px;margin-top:12px">
+            <div><div class="metric-label">上次开始</div><div class="mono" id="lastStarted">—</div></div>
+            <div><div class="metric-label">上次结束</div><div class="mono" id="lastFinished">—</div></div>
+            <div><div class="metric-label">下次检查</div><div class="mono" id="nextRun">—</div></div>
+            <div><div class="metric-label">最近任务</div><div id="latestRun">—</div></div>
+          </div>
+        </div>
       </div>
+    </section>
 
-      <!-- Add form -->
-      <div class="form-card">
-        <div class="section-title" style="margin-bottom:14px">添加镜像源</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Source（上游地址）</label>
-            <input type="text" id="inSource" placeholder="ghcr.io/user/image:latest">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Target（推送到私有仓库）</label>
-            <input type="text" id="inTarget" placeholder="localhost:5000/user/image:latest">
-          </div>
+    <section class="view" id="view-runs">
+      <div class="card">
+        <div class="section-head"><div class="section-title">同步任务历史</div><button class="btn sm" onclick="loadRuns()">刷新</button></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>触发</th><th>状态</th><th>统计</th><th>开始</th><th>结束</th><th>详情</th></tr></thead><tbody id="runsTable"><tr><td colspan="7" class="empty">加载中</td></tr></tbody></table></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <div class="section-head"><div class="section-title">任务明细</div></div>
+        <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>状态</th><th>阶段</th><th>耗时</th><th>错误</th></tr></thead><tbody id="runItemsTable"><tr><td colspan="6" class="empty">选择一条任务查看明细</td></tr></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-mirrors">
+      <div class="card">
+        <div class="section-head"><div class="section-title">镜像列表</div><button class="btn sm" onclick="loadMirrors()">刷新</button></div>
+        <div class="table-wrap"><table><thead><tr><th>#</th><th>Source</th><th>Target</th><th>Digest</th><th>状态</th><th>操作</th></tr></thead><tbody id="mirrorTable"><tr><td colspan="6" class="empty">加载中</td></tr></tbody></table></div>
+      </div>
+      <div class="card card-pad" style="margin-top:14px">
+        <div class="section-title">添加镜像</div>
+        <div class="form-grid" style="margin-top:12px">
+          <div class="field"><label>上游镜像</label><input id="inSource" placeholder="docker.io/library/nginx:latest"></div>
+          <div class="field"><label>目标镜像</label><input id="inTarget" placeholder="localhost:5000/library/nginx:latest"></div>
           <button class="btn primary" onclick="addMirror()">添加</button>
         </div>
       </div>
+    </section>
 
-      <!-- Settings -->
-      <div class="form-card" style="margin-top:14px">
-        <div class="section-title" style="margin-bottom:14px">同步设置</div>
-        <div style="display:flex;align-items:end;gap:10px">
-          <div class="form-group">
-            <label class="form-label">检查间隔（分钟）</label>
-            <input type="number" id="inInterval" style="width:120px" min="1" max="1440">
-          </div>
+    <section class="view" id="view-images">
+      <div class="card">
+        <div class="section-head"><div class="section-title">本地 Registry 镜像</div><button class="btn sm" onclick="loadImages()">刷新</button></div>
+        <div class="image-grid" id="imageGrid"><div class="empty">加载中</div></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-diagnostics">
+      <div class="card">
+        <div class="section-head">
+          <div class="section-title">环境验证</div>
+          <button class="btn primary" onclick="loadDiagnostics()">运行验证</button>
+        </div>
+        <div class="table-wrap"><table><thead><tr><th>检查项</th><th>结果</th><th>说明</th><th>建议</th></tr></thead><tbody id="diagnosticsTable"><tr><td colspan="4" class="empty">点击运行验证</td></tr></tbody></table></div>
+      </div>
+    </section>
+
+    <section class="view" id="view-logs">
+      <div class="grid two-col">
+        <div class="card">
+          <div class="section-head"><div class="section-title">同步日志</div><button class="btn sm" onclick="loadLogs()">刷新</button></div>
+          <div class="log-box" id="logBox"><div class="log-line">加载中</div></div>
+        </div>
+        <div class="card">
+          <div class="section-head"><div class="section-title">结构化事件</div><button class="btn sm" onclick="loadEvents()">刷新</button></div>
+          <div class="table-wrap"><table style="min-width:520px"><thead><tr><th>时间</th><th>级别</th><th>事件</th></tr></thead><tbody id="eventsTable"><tr><td colspan="3" class="empty">加载中</td></tr></tbody></table></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="view" id="view-settings">
+      <div class="card card-pad">
+        <div class="section-title">同步设置</div>
+        <div class="form-grid" style="grid-template-columns:180px auto;max-width:360px;margin-top:12px">
+          <div class="field"><label>检查间隔（分钟）</label><input type="number" id="inInterval" min="1" max="1440"></div>
           <button class="btn primary" onclick="saveSettings()">保存</button>
         </div>
-        <p style="font-size:11px;color:var(--muted);margin-top:8px;font-family:var(--mono)">
-          ⚠ 修改间隔后需重启 sync 容器生效：<code>docker compose restart sync</code>
-        </p>
+        <p class="muted">sync 服务会把上次/下次调度时间写入 SQLite；如果服务未重载配置，可重启 sync 容器。</p>
       </div>
-    </div>
-
-    <!-- ── 仓库镜像 ── -->
-    <div class="view" id="view-images">
-      <div class="section-head">
-        <div class="section-title">私有仓库镜像</div>
-        <button class="btn" onclick="loadImages()">刷新</button>
-      </div>
-      <div class="image-grid" id="imageGrid">
-        <div class="empty" style="grid-column:1/-1">加载中…</div>
-      </div>
-    </div>
-
-    <!-- ── 日志 ── -->
-    <div class="view" id="view-logs">
-      <div class="section-head">
-        <div class="section-title">同步日志（最近 150 行）</div>
-        <div style="display:flex;gap:8px">
-          <button class="btn sm" onclick="loadLogs()">刷新</button>
-          <button class="btn sm" onclick="scrollLogBottom()">↓ 跳到底部</button>
-        </div>
-      </div>
-      <div class="log-box" id="logBox">
-        <div class="log-line default">加载中…</div>
-      </div>
-    </div>
-
+    </section>
   </main>
 </div>
 
 <div id="toast"></div>
 
 <script>
-// ── State ──────────────────────────────────────────────────────────────
+const viewMeta = {
+  dashboard: ['概览', '查看同步状态、任务和环境健康度。'],
+  runs: ['同步任务', '查看每轮同步任务和每个镜像的结果。'],
+  mirrors: ['镜像配置', '维护上游镜像和本地 Registry 目标。'],
+  images: ['本地仓库', '查询 Registry 中已有镜像和 tag。'],
+  diagnostics: ['验证诊断', '检查部署环境、依赖和数据目录。'],
+  logs: ['日志 / 事件', '查看文本日志和 SQLite 结构化事件。'],
+  settings: ['设置', '调整同步间隔和本地偏好。']
+};
 let currentView = 'dashboard';
 let writeToken = localStorage.getItem('mirrorRegistryToken') || '';
 let defaultTokenWarned = false;
+let toastTimer;
 
-// ── View switching ─────────────────────────────────────────────────────
+function applyTheme() {
+  const theme = localStorage.getItem('mirrorRegistryTheme') || 'light';
+  document.body.classList.toggle('theme-dark', theme === 'dark');
+  document.getElementById('themeBtn').textContent = theme === 'dark' ? '浅色' : '深色';
+}
+function toggleTheme() {
+  const next = document.body.classList.contains('theme-dark') ? 'light' : 'dark';
+  localStorage.setItem('mirrorRegistryTheme', next);
+  applyTheme();
+}
 function switchView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
   document.getElementById('view-' + name).classList.add('active');
-  document.querySelectorAll('.nav-btn')[['dashboard','mirrors','images','logs'].indexOf(name)]?.classList.add('active');
+  document.getElementById('pageTitle').textContent = viewMeta[name][0];
+  document.getElementById('pageSubtitle').textContent = viewMeta[name][1];
   currentView = name;
-  if (name === 'dashboard') { loadStatus(); loadDashMirrors(); }
-  if (name === 'mirrors')   { loadMirrors(); loadSettings(); }
-  if (name === 'images')    { loadImages(); }
-  if (name === 'logs')      { loadLogs(); }
+  if (name === 'dashboard') loadDashboard();
+  if (name === 'runs') loadRuns();
+  if (name === 'mirrors') loadMirrors();
+  if (name === 'images') loadImages();
+  if (name === 'diagnostics') loadDiagnostics();
+  if (name === 'logs') { loadLogs(); loadEvents(); }
+  if (name === 'settings') loadSettings();
 }
-
-// ── API helpers ────────────────────────────────────────────────────────
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (writeToken) opts.headers.Authorization = 'Bearer ' + writeToken;
   if (body) opts.body = JSON.stringify(body);
-  const r = await fetch('/api' + path, opts);
-  if (!r.ok) {
-    const e = await r.json().catch(() => ({}));
-    throw new Error(e.detail || r.statusText);
+  const res = await fetch('/api' + path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || res.statusText);
   }
-  return r.json();
+  return res.json();
 }
-
 function saveToken() {
   writeToken = document.getElementById('tokenInput').value.trim();
   if (writeToken) {
@@ -594,94 +463,89 @@ function saveToken() {
     toast('访问令牌已清空', 'err');
   }
 }
-
-// ── Toast ──────────────────────────────────────────────────────────────
-let toastTimer;
-function toast(msg, type = 'ok') {
+function toast(message, type = 'ok') {
   const el = document.getElementById('toast');
-  el.textContent = msg;
+  el.textContent = message;
   el.className = 'show ' + type;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 3000);
+  toastTimer = setTimeout(() => { el.className = ''; }, 3200);
 }
-
-// ── Status ─────────────────────────────────────────────────────────────
+function esc(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+function fmtTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return esc(value);
+  return date.toLocaleString();
+}
+function statusBadge(status) {
+  const map = {
+    ok: ['ok', '正常'],
+    completed: ['ok', '完成'],
+    success: ['ok', '成功'],
+    skipped: ['warn', '跳过'],
+    warn: ['warn', '警告'],
+    running: ['', '运行中'],
+    pending: ['warn', '待同步'],
+    failed: ['err', '失败'],
+    error: ['err', '错误']
+  };
+  const item = map[status] || ['', status || '未知'];
+  return `<span class="badge ${item[0]}">${esc(item[1])}</span>`;
+}
 async function loadStatus() {
-  try {
-    const s = await api('GET', '/status');
-    document.getElementById('statTotal').textContent   = s.total;
-    document.getElementById('statSynced').textContent  = s.synced;
-    document.getElementById('statPending').textContent = s.pending;
-    const iv = document.getElementById('statInterval');
-    iv.innerHTML = s.interval + '<span style="font-size:14px;color:var(--muted)"> min</span>';
-    const pulse = document.getElementById('syncPulse');
-    const label = document.getElementById('syncLabel');
-    if (s.is_syncing) {
-      pulse.className = 'pulse syncing';
-      label.textContent = '同步中…';
-    } else {
-      pulse.className = 'pulse';
-      label.textContent = '就绪';
-    }
-    if (s.using_default_token && !defaultTokenWarned) {
-      defaultTokenWarned = true;
-      toast('当前使用默认写操作令牌 change-me，请在生产环境替换', 'err');
-    }
-  } catch(e) { console.error(e); }
-}
-
-// ── Dashboard mirrors ──────────────────────────────────────────────────
-async function loadDashMirrors() {
-  const tbody = document.getElementById('dashMirrorTable');
-  try {
-    const list = await api('GET', '/mirrors');
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="3" class="empty">暂无镜像，前往「镜像管理」添加</td></tr>';
-      return;
-    }
-    tbody.innerHTML = list.map(m => `
-      <tr>
-        <td class="td-source">${esc(m.source)}</td>
-        <td>${m.synced
-          ? '<span class="badge synced"><span class="badge dot"></span>已同步</span>'
-          : '<span class="badge pending"><span class="badge dot"></span>待同步</span>'}</td>
-        <td class="td-digest">${esc(m.digest) || '—'}</td>
-      </tr>`).join('');
-  } catch(e) {
-    tbody.innerHTML = '<tr><td colspan="3" class="empty">加载失败</td></tr>';
+  const s = await api('GET', '/status');
+  document.getElementById('statTotal').textContent = s.total;
+  document.getElementById('statSynced').textContent = s.synced;
+  document.getElementById('statPending').textContent = s.pending;
+  document.getElementById('statInterval').textContent = s.interval;
+  document.getElementById('lastStarted').textContent = fmtTime(s.last_started_at);
+  document.getElementById('lastFinished').textContent = fmtTime(s.last_finished_at);
+  document.getElementById('nextRun').textContent = fmtTime(s.next_run_at);
+  document.getElementById('engineBadge').textContent = 'engine: ' + (s.sync_engine || 'skopeo');
+  document.getElementById('syncBadge').outerHTML = `<span class="badge ${s.is_syncing ? 'warn' : 'ok'}" id="syncBadge">${s.is_syncing ? '同步中' : '就绪'}</span>`;
+  document.getElementById('latestRun').innerHTML = s.latest_run
+    ? `${statusBadge(s.latest_run.status)} <span class="muted">#${esc(s.latest_run.id)} ${esc(s.latest_run.message || '')}</span>`
+    : '—';
+  if (s.using_default_token && !defaultTokenWarned) {
+    defaultTokenWarned = true;
+    toast('当前使用默认写操作令牌 change-me，请在生产环境替换', 'err');
   }
 }
-
-// ── Mirrors management ─────────────────────────────────────────────────
-async function loadMirrors() {
-  const tbody = document.getElementById('mirrorTable');
-  try {
-    const list = await api('GET', '/mirrors');
-    if (!list.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无镜像，在下方添加</td></tr>';
-      return;
-    }
-    tbody.innerHTML = list.map(m => `
-      <tr>
-        <td style="color:var(--muted)">${m.index + 1}</td>
-        <td class="td-source">${esc(m.source)}</td>
-        <td class="td-target">${esc(m.target)}</td>
-        <td class="td-digest">${esc(m.digest) || '—'}</td>
-        <td>${m.synced
-          ? '<span class="badge synced"><span class="badge dot"></span>已同步</span>'
-          : '<span class="badge pending"><span class="badge dot"></span>待同步</span>'}</td>
-        <td>
-          <div class="td-actions">
-            <button class="btn sm" onclick="resetDigest(${m.index})" title="清除 digest 缓存，下次强制重新拉取">重置</button>
-            <button class="btn sm danger" onclick="deleteMirror(${m.index})">删除</button>
-          </div>
-        </td>
-      </tr>`).join('');
-  } catch(e) {
-    tbody.innerHTML = '<tr><td colspan="6" class="empty">加载失败</td></tr>';
-  }
+async function loadDashboard() {
+  await loadStatus().catch(err => toast(err.message, 'err'));
+  await loadMirrors(true).catch(() => {});
 }
-
+async function loadMirrors(onlyDashboard = false) {
+  const list = await api('GET', '/mirrors');
+  const rows = list.length ? list.map(m => `
+    <tr>
+      <td class="ref">${esc(m.source)}</td>
+      <td class="ref">${esc(m.target)}</td>
+      <td>${m.synced ? statusBadge('success') : statusBadge('pending')}</td>
+      <td>${m.last_status ? statusBadge(m.last_status) : '<span class="muted">—</span>'} <span class="muted">${esc(m.last_step || '')}</span></td>
+    </tr>`).join('') : '<tr><td colspan="4" class="empty">暂无镜像</td></tr>';
+  document.getElementById('dashMirrorTable').innerHTML = rows;
+  if (onlyDashboard) return;
+  document.getElementById('mirrorTable').innerHTML = list.length ? list.map(m => `
+    <tr>
+      <td>${m.index + 1}</td>
+      <td class="ref">${esc(m.source)}</td>
+      <td class="ref">${esc(m.target)}</td>
+      <td class="mono">${esc(m.digest) || '—'}</td>
+      <td>${m.synced ? statusBadge('success') : statusBadge('pending')}</td>
+      <td><div class="actions">
+        <button class="btn sm" onclick="triggerMirror(${m.index})">同步</button>
+        <button class="btn sm" onclick="resetDigest(${m.index})">重置</button>
+        <button class="btn sm danger" onclick="deleteMirror(${m.index})">删除</button>
+      </div></td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">暂无镜像，在下方添加</td></tr>';
+}
 async function addMirror() {
   const source = document.getElementById('inSource').value.trim();
   const target = document.getElementById('inTarget').value.trim();
@@ -690,118 +554,106 @@ async function addMirror() {
     await api('POST', '/mirrors', { source, target });
     document.getElementById('inSource').value = '';
     document.getElementById('inTarget').value = '';
-    toast('✓ 添加成功');
+    toast('镜像已添加');
     loadMirrors();
     loadStatus();
-  } catch(e) { toast('✗ ' + e.message, 'err'); }
+  } catch (err) { toast(err.message, 'err'); }
 }
-
 async function deleteMirror(index) {
   if (!confirm('确认删除该镜像条目？')) return;
-  try {
-    await api('DELETE', '/mirrors/' + index);
-    toast('✓ 已删除');
-    loadMirrors();
-    loadStatus();
-  } catch(e) { toast('✗ ' + e.message, 'err'); }
+  try { await api('DELETE', '/mirrors/' + index); toast('已删除'); loadMirrors(); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
 }
-
 async function resetDigest(index) {
-  try {
-    await api('POST', '/mirrors/' + index + '/reset');
-    toast('✓ 已重置，下次同步将强制拉取');
-    loadMirrors();
-  } catch(e) { toast('✗ ' + e.message, 'err'); }
+  try { await api('POST', '/mirrors/' + index + '/reset'); toast('已重置 digest'); loadMirrors(); }
+  catch (err) { toast(err.message, 'err'); }
 }
-
-// ── Sync trigger ───────────────────────────────────────────────────────
+async function triggerMirror(index) {
+  try { await api('POST', '/mirrors/' + index + '/sync'); toast('单镜像同步已触发'); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
+}
 async function triggerSync() {
-  try {
-    await api('POST', '/sync');
-    toast('✓ 同步已触发，请查看日志');
-    setTimeout(loadStatus, 800);
-  } catch(e) { toast('✗ ' + e.message, 'err'); }
+  try { await api('POST', '/sync'); toast('同步已触发'); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
 }
-
-// ── Settings ───────────────────────────────────────────────────────────
-async function loadSettings() {
-  try {
-    const s = await api('GET', '/settings');
-    document.getElementById('inInterval').value = s.check_interval_minutes ?? 30;
-  } catch(e) {}
+async function loadRuns() {
+  const runs = await api('GET', '/sync-runs?limit=30');
+  document.getElementById('runsTable').innerHTML = runs.length ? runs.map(run => `
+    <tr>
+      <td class="mono">#${run.id}</td>
+      <td>${esc(run.reason)}${run.only_source ? '<div class="muted ref">' + esc(run.only_source) + '</div>' : ''}</td>
+      <td>${statusBadge(run.status)}</td>
+      <td>${esc(run.message || `total ${run.total}`)}</td>
+      <td>${fmtTime(run.started_at)}</td>
+      <td>${fmtTime(run.ended_at)}</td>
+      <td><button class="btn sm" onclick="loadRunDetail(${run.id})">查看</button></td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">暂无任务历史</td></tr>';
 }
-
-async function saveSettings() {
-  const v = parseInt(document.getElementById('inInterval').value);
-  if (!v || v < 1) { toast('请输入有效间隔（≥1 分钟）', 'err'); return; }
-  try {
-    await api('PUT', '/settings', { check_interval_minutes: v });
-    toast('✓ 设置已保存（重启 sync 容器后生效）');
-    loadStatus();
-  } catch(e) { toast('✗ ' + e.message, 'err'); }
+async function loadRunDetail(id) {
+  const run = await api('GET', '/sync-runs/' + id);
+  document.getElementById('runItemsTable').innerHTML = run.items.length ? run.items.map(item => `
+    <tr>
+      <td class="ref">${esc(item.source)}</td>
+      <td class="ref">${esc(item.target)}${item.copy_target ? '<div class="muted ref">copy: ' + esc(item.copy_target) + '</div>' : ''}</td>
+      <td>${statusBadge(item.status)}</td>
+      <td>${esc(item.step || '—')}</td>
+      <td>${item.duration_ms == null ? '—' : esc(item.duration_ms + ' ms')}</td>
+      <td class="muted">${esc(item.error || '')}</td>
+    </tr>`).join('') : '<tr><td colspan="6" class="empty">无明细</td></tr>';
 }
-
-// ── Images ─────────────────────────────────────────────────────────────
 async function loadImages() {
-  const grid = document.getElementById('imageGrid');
-  grid.innerHTML = '<div class="empty" style="grid-column:1/-1"><span class="spinner"></span> 加载中…</div>';
-  try {
-    const list = await api('GET', '/images');
-    if (!list.length) {
-      grid.innerHTML = '<div class="empty" style="grid-column:1/-1">仓库为空</div>';
-      return;
-    }
-    grid.innerHTML = list.map(img => `
-      <div class="image-card">
-        <div class="image-repo">${esc(img.repo)}</div>
-        <div class="tag-list">
-          ${(img.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('') || '<span class="tag" style="color:var(--muted)">无 tag</span>'}
-        </div>
-      </div>`).join('');
-  } catch(e) {
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1">加载失败：${esc(e.message)}</div>`;
-  }
+  const list = await api('GET', '/images');
+  document.getElementById('imageGrid').innerHTML = list.length ? list.map(img => `
+    <div class="card card-pad">
+      <div class="ref">${esc(img.repo)}</div>
+      <div class="tag-list">${(img.tags || []).map(tag => `<span class="badge">${esc(tag)}</span>`).join('') || '<span class="muted">无 tag</span>'}</div>
+    </div>`).join('') : '<div class="empty">仓库为空</div>';
 }
-
-// ── Logs ───────────────────────────────────────────────────────────────
+async function loadDiagnostics() {
+  const result = await api('POST', '/diagnostics/run');
+  document.getElementById('diagnosticsTable').innerHTML = result.checks.map(item => `
+    <tr>
+      <td>${esc(item.name)}</td>
+      <td>${statusBadge(item.status)}</td>
+      <td>${esc(item.message)}</td>
+      <td class="muted">${esc(item.suggestion || '')}</td>
+    </tr>`).join('');
+}
 async function loadLogs() {
-  const box = document.getElementById('logBox');
-  try {
-    const { lines } = await api('GET', '/logs?lines=150');
-    box.innerHTML = lines.map(line => {
-      let cls = 'default';
-      if (/✅|同步完成|INFO/.test(line))           cls = 'success';
-      else if (/🆕|发现更新|🔄/.test(line))        cls = 'info';
-      else if (/⚠|WARNING|跳过/.test(line))        cls = 'warn';
-      else if (/ERROR|失败|✗/.test(line))           cls = 'error';
-      else if (/===|INFO|启动/.test(line))          cls = 'info';
-      return `<div class="log-line ${cls}">${esc(line)}</div>`;
-    }).join('');
-    scrollLogBottom();
-  } catch(e) {
-    box.innerHTML = `<div class="log-line error">加载失败：${esc(e.message)}</div>`;
-  }
-}
-
-function scrollLogBottom() {
+  const data = await api('GET', '/logs?lines=150');
+  document.getElementById('logBox').innerHTML = data.lines.map(line => {
+    let cls = /ERROR|失败/.test(line) ? 'line-error' : (/WARNING|跳过|警告/.test(line) ? 'line-warn' : 'line-info');
+    return `<div class="log-line ${cls}">${esc(line)}</div>`;
+  }).join('');
   const box = document.getElementById('logBox');
   box.scrollTop = box.scrollHeight;
 }
-
-// ── Utils ──────────────────────────────────────────────────────────────
-function esc(s) {
-  return String(s ?? '')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+async function loadEvents() {
+  const events = await api('GET', '/events?limit=100');
+  document.getElementById('eventsTable').innerHTML = events.length ? events.map(event => `
+    <tr>
+      <td>${fmtTime(event.created_at)}</td>
+      <td>${statusBadge(String(event.level || '').toLowerCase())}</td>
+      <td>${esc(event.message)}${event.source ? '<div class="muted ref">' + esc(event.source) + '</div>' : ''}</td>
+    </tr>`).join('') : '<tr><td colspan="3" class="empty">暂无结构化事件</td></tr>';
 }
-
-// ── Init ───────────────────────────────────────────────────────────────
-loadStatus();
-loadDashMirrors();
+async function loadSettings() {
+  const s = await api('GET', '/settings');
+  document.getElementById('inInterval').value = s.check_interval_minutes ?? 30;
+}
+async function saveSettings() {
+  const value = parseInt(document.getElementById('inInterval').value, 10);
+  if (!value || value < 1) { toast('请输入有效同步间隔', 'err'); return; }
+  try { await api('PUT', '/settings', { check_interval_minutes: value }); toast('设置已保存'); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
+}
+applyTheme();
 document.getElementById('tokenInput').value = writeToken;
+loadDashboard();
 setInterval(() => {
-  loadStatus();
-  if (currentView === 'dashboard') loadDashMirrors();
+  loadStatus().catch(() => {});
+  if (currentView === 'dashboard') loadMirrors(true).catch(() => {});
+  if (currentView === 'runs') loadRuns().catch(() => {});
 }, 15000);
 </script>
 </body>

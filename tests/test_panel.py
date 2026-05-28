@@ -11,6 +11,7 @@ def panel_app(tmp_path, monkeypatch):
     state_path = tmp_path / "data" / "sync-state.json"
     log_path = tmp_path / "data" / "sync.log"
     trigger_path = tmp_path / "data" / ".trigger"
+    db_path = tmp_path / "data" / "mirror-registry.db"
     static_dir = tmp_path / "static"
 
     static_dir.mkdir(parents=True)
@@ -26,6 +27,7 @@ def panel_app(tmp_path, monkeypatch):
     monkeypatch.setenv("STATE_PATH", str(state_path))
     monkeypatch.setenv("LOG_PATH", str(log_path))
     monkeypatch.setenv("TRIGGER_PATH", str(trigger_path))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("PANEL_TOKEN", "test-token")
 
@@ -82,6 +84,7 @@ def test_trigger_sync_creates_trigger_file(panel_app):
 
     assert response.status_code == 200
     assert trigger_path.exists()
+    assert "manual" in trigger_path.read_text(encoding="utf-8")
 
 
 def test_rejects_image_reference_without_tag(panel_app):
@@ -97,3 +100,29 @@ def test_rejects_image_reference_without_tag(panel_app):
     )
 
     assert response.status_code == 400
+
+
+def test_single_mirror_sync_trigger_writes_source(panel_app):
+    client, _, _, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/nginx:latest",
+            "target": "localhost:5000/library/nginx:latest",
+        },
+        headers=headers,
+    )
+    response = client.post("/api/mirrors/0/sync", headers=headers)
+
+    assert response.status_code == 200
+    assert "docker.io/library/nginx:latest" in trigger_path.read_text(encoding="utf-8")
+
+
+def test_diagnostics_and_sync_runs_are_available(panel_app):
+    client, _, _, _ = panel_app
+
+    assert client.get("/api/diagnostics").status_code == 200
+    assert client.post("/api/diagnostics/run").status_code == 200
+    assert client.get("/api/sync-runs").status_code == 200

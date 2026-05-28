@@ -16,6 +16,7 @@ services:
       STATE_PATH: /data/sync-state.json
       LOG_PATH: /data/sync.log
       TRIGGER_PATH: /data/.trigger
+      DATABASE_URL: sqlite:////data/mirror-registry.db
       REGISTRY_URL: http://registry:5000
       PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
     ports:
@@ -34,10 +35,15 @@ services:
       STATE_PATH: /data/sync-state.json
       LOG_PATH: /data/sync.log
       TRIGGER_PATH: /data/.trigger
+      DATABASE_URL: sqlite:////data/mirror-registry.db
+      SYNC_ENGINE: skopeo
+      SYNC_RETRY_COUNT: ${SYNC_RETRY_COUNT:-2}
+      SKOPEO_COPY_ALL: ${SKOPEO_COPY_ALL:-1}
+      SKOPEO_DEST_TLS_VERIFY: ${SKOPEO_DEST_TLS_VERIFY:-false}
+      SYNC_TARGET_REGISTRY: registry:5000
       COMMAND_TIMEOUT_SECONDS: 900
     volumes:
       - ./config:/config:ro       # mirrors.yml（只读）
       - ./data:/data              # sync-state.json + sync.log + .trigger
-      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       - registry

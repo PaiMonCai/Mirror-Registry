@@ -88,14 +88,16 @@ def require_compose_shape() -> None:
         "./config/registry-config.yml:/etc/docker/registry/config.yml",
         "./config:/config",
         "./data:/data",
-        "/var/run/docker.sock:/var/run/docker.sock",
+        "DATABASE_URL: sqlite:////data/mirror-registry.db",
+        "SYNC_ENGINE: skopeo",
+        "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in compose]
     if missing:
         fail(f"docker-compose.yml missing snippets: {missing}")
-    forbidden_snippets = ["build: ./panel", "build: ./sync", "pull_policy: always"]
+    forbidden_snippets = ["build: ./panel", "build: ./sync", "pull_policy: always", "/var/run/docker.sock"]
     forbidden = [snippet for snippet in forbidden_snippets if snippet in compose]
     if forbidden:
         fail(f"production docker-compose.yml must pull images, not build locally: {forbidden}")
@@ -115,7 +117,9 @@ def require_compose_shape() -> None:
         "./config/registry-config.yml:/etc/docker/registry/config.yml",
         "./config:/config",
         "./data:/data",
-        "/var/run/docker.sock:/var/run/docker.sock",
+        "DATABASE_URL: sqlite:////data/mirror-registry.db",
+        "SYNC_ENGINE: skopeo",
+        "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
     ]
@@ -145,7 +149,7 @@ def require_dockerfile_contexts() -> None:
             "required": ["requirements.txt", "sync.py"],
             "dockerfile_snippets": [
                 "FROM python:3.12-slim",
-                "apt-get install -y --no-install-recommends skopeo docker.io",
+                "apt-get install -y --no-install-recommends ca-certificates skopeo",
                 "COPY requirements.txt .",
                 "COPY sync.py .",
                 'CMD ["python", "sync.py"]',
@@ -194,14 +198,35 @@ def require_config_shape() -> None:
 def require_panel_features() -> None:
     source = read("panel/main.py")
     tree = ast.parse(source)
-    function_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    for name in ["require_write_token", "atomic_write_text", "validate_image_ref", "save_config", "save_state"]:
+    function_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for name in [
+        "require_write_token",
+        "atomic_write_text",
+        "validate_image_ref",
+        "save_config",
+        "save_state",
+        "run_diagnostics",
+        "list_sync_runs",
+        "trigger_mirror_sync",
+        "connect_db",
+    ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
 
     required_snippets = [
         "PANEL_TOKEN",
         "Depends(require_write_token)",
+        "DATABASE_URL",
+        "sync_runs",
+        "sync_run_items",
+        "log_events",
+        "@app.get(\"/api/diagnostics\")",
+        "@app.get(\"/api/sync-runs\")",
+        "@app.post(\"/api/mirrors/{index}/sync\"",
         "IMAGE_REF_RE",
         "settings.get(\"registry_url\")",
         "min(lines, 1000)",
@@ -217,11 +242,20 @@ def require_panel_features() -> None:
 def require_sync_features() -> None:
     source = read("sync/sync.py")
     tree = ast.parse(source)
-    function_names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    function_names = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
     for name in [
         "atomic_write_text",
         "valid_mirrors",
         "run_command",
+        "copy_image",
+        "resolve_copy_target",
+        "build_skopeo_copy_command",
+        "create_run",
+        "update_run_item",
         "pull_and_push",
         "cleanup_local_tags",
         "sync_all",
@@ -232,6 +266,16 @@ def require_sync_features() -> None:
 
     required_snippets = [
         "COMMAND_TIMEOUT_SECONDS",
+        "DATABASE_URL",
+        "SYNC_ENGINE",
+        "skopeo",
+        "copy",
+        "--all",
+        "SYNC_TARGET_REGISTRY",
+        "sync_runs",
+        "sync_run_items",
+        "runtime_state",
+        "log_events",
         "with sync_lock:",
         "排队等待",
         "subprocess.TimeoutExpired",
@@ -242,17 +286,27 @@ def require_sync_features() -> None:
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
         fail(f"sync/sync.py missing reliability snippets: {missing}")
-    ok("sync service has timeout, atomic state, bad config handling, and anti-reentry")
+    forbidden = ["docker pull", "docker tag", "docker push", "docker rmi"]
+    bad = [snippet for snippet in forbidden if snippet in source]
+    if bad:
+        fail(f"sync/sync.py must use skopeo copy instead of Docker CLI: {bad}")
+    ok("sync service has v2 skopeo copy, SQLite run history, timeout, and anti-reentry")
 
 
 def require_frontend_features() -> None:
     source = read("panel/static/index.html")
     required_snippets = [
         'id="tokenInput"',
+        "mirrorRegistryTheme",
         "localStorage.getItem('mirrorRegistryToken')",
         "opts.headers.Authorization = 'Bearer ' + writeToken",
         "function saveToken()",
-        "function esc(s)",
+        "function loadDiagnostics()",
+        "function loadRuns()",
+        "function toggleTheme()",
+        "function esc(",
+        "验证诊断",
+        "同步任务",
         "using_default_token",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
@@ -267,7 +321,16 @@ def require_frontend_features() -> None:
 
 def require_tests_and_docs() -> None:
     tests = read("tests/test_panel.py") + "\n" + read("tests/test_sync.py")
-    for snippet in ["Authorization", "/api/status", "/api/sync", "save_state", "valid_mirrors"]:
+    for snippet in [
+        "Authorization",
+        "/api/status",
+        "/api/sync",
+        "/api/diagnostics",
+        "/api/sync-runs",
+        "save_state",
+        "valid_mirrors",
+        "build_skopeo_copy_command",
+    ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
     readme = read("README.md")
@@ -276,6 +339,9 @@ def require_tests_and_docs() -> None:
         "docker compose up -d",
         "docker compose -f docker-compose.dev.yml up -d --build",
         "MIRROR_REGISTRY_IMAGE_TAG=v1.0.0",
+        "skopeo copy",
+        "data/mirror-registry.db",
+        "验证诊断",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -289,6 +355,9 @@ def require_tests_and_docs() -> None:
     for snippet in [
         "Single-node private Docker registry",
         "Production Deployment",
+        "v2 Operations",
+        "skopeo copy",
+        "data/mirror-registry.db",
         "docker compose pull",
         "docker compose -f docker-compose.dev.yml up -d --build",
         "Development Images",
@@ -297,7 +366,7 @@ def require_tests_and_docs() -> None:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
     env_example = read(".env.example")
-    for snippet in ["PANEL_TOKEN=", "MIRROR_REGISTRY_IMAGE_TAG=latest"]:
+    for snippet in ["PANEL_TOKEN=", "MIRROR_REGISTRY_IMAGE_TAG=latest", "SYNC_RETRY_COUNT=2", "SKOPEO_COPY_ALL=1"]:
         if snippet not in env_example:
             fail(f".env.example missing {snippet!r}")
     dev_requirements = read("requirements-dev.txt")
