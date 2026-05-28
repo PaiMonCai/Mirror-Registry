@@ -8,7 +8,7 @@ Single-node private Docker registry with a lightweight management panel and sche
 
 - `registry`: official `registry:2`, storing image layers under `data/registry`.
 - `panel`: FastAPI API plus the static web panel on port `8080`.
-- `sync`: Python worker that checks upstream image digests and mirrors changed images into the local registry.
+- `sync`: Python worker that checks upstream image digests and mirrors changed images into the local registry with `skopeo copy`.
 
 ## Production Deployment
 
@@ -21,6 +21,8 @@ docker compose up -d
 docker compose ps
 ```
 
+You can also run the update as one command: `docker compose pull && docker compose up -d`.
+
 Open `http://localhost:8080`.
 
 The default write API token is `change-me`. Set a real token in `.env` before exposing the panel:
@@ -28,8 +30,12 @@ The default write API token is `change-me`. Set a real token in `.env` before ex
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
-APP_VERSION=v2
+APP_VERSION=v3
+SYNC_CONCURRENCY=2
 SYNC_RETRY_COUNT=2
+SYNC_RETRY_BACKOFF_SECONDS=2
+DISK_LOW_BYTES=2147483648
+NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
 ```
@@ -41,6 +47,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 The panel stores the token in browser local storage and sends it as a Bearer token for write operations.
+
+## v3 Management
+
+- Concurrent sync: `sync_concurrency` defaults to `2`; the sync worker locks each target image so the same tag is not written concurrently.
+- Retry policy: `sync_retry_count` controls max retries; copy failures use exponential backoff, and the panel can retry failed runs or failed items.
+- Storage management: the panel shows local Registry repositories, tags, estimated usage, deletion marks, and garbage collection guidance.
+- Notifications: configure `NOTIFY_WEBHOOK_URL` or the panel webhook setting to send sync failure, recovery, and low disk space events.
+- Authentication boundary: `PANEL_TOKEN` protects write APIs only. Put the panel behind a reverse proxy with Basic Auth or another login layer before exposing it publicly.
+- Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
 
 ## v2 Operations
 
@@ -71,12 +86,24 @@ mirrors:
 settings:
   check_interval_minutes: 30
   registry_url: http://registry:5000
+  sync_concurrency: 2
+  sync_retry_count: 2
 ```
 
-After changing `check_interval_minutes`, restart the sync service:
+After changing `check_interval_minutes`, restart the sync service if you need the scheduler interval to apply immediately:
 
 ```powershell
 docker compose restart sync
+```
+
+## Storage Cleanup
+
+Deletion marks in the panel record cleanup intent only. To actually release Registry storage, delete the relevant manifests first, then run garbage collection:
+
+```powershell
+docker compose stop registry
+docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml
+docker compose up -d registry
 ```
 
 ## Local Checks

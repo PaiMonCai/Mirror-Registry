@@ -89,9 +89,14 @@ def require_compose_shape() -> None:
         "./config:/config",
         "./data:/data",
         "DATABASE_URL: sqlite:////data/mirror-registry.db",
-        "APP_VERSION: v2",
+        "APP_VERSION: v3",
         "MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}",
         "SYNC_ENGINE: skopeo",
+        "SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}",
+        "SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}",
+        "DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}",
+        "NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}",
+        "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
@@ -120,9 +125,14 @@ def require_compose_shape() -> None:
         "./config:/config",
         "./data:/data",
         "DATABASE_URL: sqlite:////data/mirror-registry.db",
-        "APP_VERSION: v2",
+        "APP_VERSION: v3",
         "MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}",
         "SYNC_ENGINE: skopeo",
+        "SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}",
+        "SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}",
+        "DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}",
+        "NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}",
+        "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
@@ -190,6 +200,8 @@ def require_config_shape() -> None:
         "target: localhost:5000/library/nginx:latest",
         "check_interval_minutes: 30",
         "registry_url: http://registry:5000",
+        "sync_concurrency: 2",
+        "sync_retry_count: 2",
     ]:
         if snippet not in mirrors:
             fail(f"config/mirrors.yml missing {snippet!r}")
@@ -217,6 +229,13 @@ def require_panel_features() -> None:
         "list_sync_runs",
         "trigger_mirror_sync",
         "connect_db",
+        "export_mirrors",
+        "import_mirrors",
+        "retry_sync_run",
+        "retry_sync_run_item",
+        "get_storage",
+        "mark_image_for_delete",
+        "get_security_guide",
     ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
@@ -239,6 +258,17 @@ def require_panel_features() -> None:
         "min(lines, 1000)",
         "response.raise_for_status()",
         "StaticFiles(directory=STATIC_DIR",
+        "sync_concurrency",
+        "sync_retry_count",
+        "notify_webhook_url",
+        "deletion_marks",
+        "@app.get(\"/api/mirrors/export\")",
+        "@app.post(\"/api/mirrors/import\"",
+        "@app.post(\"/api/sync-runs/{run_id}/retry\"",
+        "@app.post(\"/api/sync-run-items/{item_id}/retry\"",
+        "@app.get(\"/api/storage\")",
+        "@app.post(\"/api/storage/delete-mark\"",
+        "@app.get(\"/api/security-guide\")",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -259,6 +289,10 @@ def require_sync_features() -> None:
         "valid_mirrors",
         "run_command",
         "copy_image",
+        "process_mirror",
+        "notify_webhook",
+        "check_disk_space",
+        "get_target_lock",
         "resolve_copy_target",
         "build_skopeo_copy_command",
         "create_run",
@@ -291,6 +325,15 @@ def require_sync_features() -> None:
         ".invalid-",
         "失败步骤",
         "save_state(state)",
+        "ThreadPoolExecutor",
+        "as_completed",
+        "SYNC_CONCURRENCY",
+        "SYNC_RETRY_BACKOFF_SECONDS",
+        "NOTIFY_WEBHOOK_URL",
+        "DISK_LOW_BYTES",
+        "deletion_marks",
+        "target_locks",
+        "parse_trigger",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -312,6 +355,18 @@ def require_frontend_features() -> None:
         "function saveToken()",
         "function loadDiagnostics()",
         "function loadRuns()",
+        "function retryRun(",
+        "function retryRunItem(",
+        "function exportMirrors()",
+        "function importMirrors(",
+        "function loadStorage()",
+        "function markDelete(",
+        "function loadSecurityGuide()",
+        "sync_concurrency",
+        "Webhook URL",
+        "删除标记",
+        "垃圾回收",
+        "公网暴露安全边界",
         "function toggleTheme()",
         "function esc(",
         "验证诊断",
@@ -336,9 +391,14 @@ def require_tests_and_docs() -> None:
         "/api/sync",
         "/api/diagnostics",
         "/api/sync-runs",
+        "/api/mirrors/export",
+        "/api/mirrors/import",
+        "/api/storage",
+        "/api/security-guide",
         "save_state",
         "valid_mirrors",
         "build_skopeo_copy_command",
+        "parse_trigger",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -346,12 +406,19 @@ def require_tests_and_docs() -> None:
     for snippet in [
         "docker compose pull",
         "docker compose up -d",
+        "docker compose pull && docker compose up -d",
         "docker compose -f docker-compose.dev.yml up -d --build",
         "MIRROR_REGISTRY_IMAGE_TAG=v1.0.0",
         "skopeo copy",
         "data/mirror-registry.db",
         "验证诊断",
         "当前镜像 tag",
+        "v3 管理增强能力",
+        "sync_concurrency",
+        "NOTIFY_WEBHOOK_URL",
+        "删除标记",
+        "Basic Auth",
+        "导入导出",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -365,6 +432,7 @@ def require_tests_and_docs() -> None:
     for snippet in [
         "Single-node private Docker registry",
         "Production Deployment",
+        "v3 Management",
         "v2 Operations",
         "skopeo copy",
         "data/mirror-registry.db",
@@ -373,11 +441,24 @@ def require_tests_and_docs() -> None:
         "docker compose -f docker-compose.dev.yml up -d --build",
         "Development Images",
         "Release Images",
+        "NOTIFY_WEBHOOK_URL",
+        "Basic Auth",
+        "Import/export",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
     env_example = read(".env.example")
-    for snippet in ["PANEL_TOKEN=", "MIRROR_REGISTRY_IMAGE_TAG=latest", "APP_VERSION=v2", "SYNC_RETRY_COUNT=2", "SKOPEO_COPY_ALL=1"]:
+    for snippet in [
+        "PANEL_TOKEN=",
+        "MIRROR_REGISTRY_IMAGE_TAG=latest",
+        "APP_VERSION=v3",
+        "SYNC_CONCURRENCY=2",
+        "SYNC_RETRY_COUNT=2",
+        "SYNC_RETRY_BACKOFF_SECONDS=2",
+        "DISK_LOW_BYTES=2147483648",
+        "NOTIFY_WEBHOOK_URL=",
+        "SKOPEO_COPY_ALL=1",
+    ]:
         if snippet not in env_example:
             fail(f".env.example missing {snippet!r}")
     dev_requirements = read("requirements-dev.txt")

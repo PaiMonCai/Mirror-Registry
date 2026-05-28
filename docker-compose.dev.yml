@@ -18,7 +18,8 @@ services:
       TRIGGER_PATH: /data/.trigger
       DATABASE_URL: sqlite:////data/mirror-registry.db
       REGISTRY_URL: http://registry:5000
-      APP_VERSION: v2
+      REGISTRY_STORAGE_PATH: /data/registry
+      APP_VERSION: v3
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
     ports:
@@ -39,9 +40,13 @@ services:
       TRIGGER_PATH: /data/.trigger
       DATABASE_URL: sqlite:////data/mirror-registry.db
       SYNC_ENGINE: skopeo
-      APP_VERSION: v2
+      APP_VERSION: v3
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       SYNC_RETRY_COUNT: ${SYNC_RETRY_COUNT:-2}
+      SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}
+      SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}
+      DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
       SKOPEO_COPY_ALL: ${SKOPEO_COPY_ALL:-1}
       SKOPEO_DEST_TLS_VERIFY: ${SKOPEO_DEST_TLS_VERIFY:-false}
       SYNC_TARGET_REGISTRY: registry:5000

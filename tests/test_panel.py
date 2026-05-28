@@ -126,3 +126,96 @@ def test_diagnostics_and_sync_runs_are_available(panel_app):
     assert client.get("/api/diagnostics").status_code == 200
     assert client.post("/api/diagnostics/run").status_code == 200
     assert client.get("/api/sync-runs").status_code == 200
+
+
+def test_settings_include_v3_controls(panel_app):
+    client, config_path, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    response = client.put(
+        "/api/settings",
+        json={
+            "check_interval_minutes": 15,
+            "sync_concurrency": 3,
+            "sync_retry_count": 4,
+            "notify_webhook_url": "https://example.com/hook",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    settings = client.get("/api/settings").json()
+    assert settings["check_interval_minutes"] == 15
+    assert settings["sync_concurrency"] == 3
+    assert settings["sync_retry_count"] == 4
+    assert settings["notify_webhook_configured"] is True
+    assert "https://example.com/hook" in config_path.read_text(encoding="utf-8")
+
+
+def test_mirror_export_import(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    payload = {
+        "mirrors": [
+            {
+                "source": "docker.io/library/nginx:latest",
+                "target": "localhost:5000/library/nginx:latest",
+            }
+        ],
+        "replace": True,
+    }
+
+    response = client.post("/api/mirrors/import", json=payload, headers=headers)
+
+    assert response.status_code == 200
+    exported = client.get("/api/mirrors/export").json()
+    assert exported["mirrors"][0]["source"] == "docker.io/library/nginx:latest"
+
+
+def test_retry_failed_run_writes_sources_trigger(panel_app):
+    client, _, _, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    import panel.main as panel_main
+
+    run_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, failed) VALUES (?, ?, ?, ?, ?)",
+        ("manual", "failed", None, panel_main.now_iso(), 1),
+    )
+    panel_main.db_execute(
+        """
+        INSERT INTO sync_run_items(run_id, source, target, status, started_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            "docker.io/library/nginx:latest",
+            "localhost:5000/library/nginx:latest",
+            "failed",
+            panel_main.now_iso(),
+        ),
+    )
+
+    response = client.post(f"/api/sync-runs/{run_id}/retry", headers=headers)
+
+    assert response.status_code == 200
+    trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
+    assert trigger["reason"] == "retry-run"
+    assert trigger["sources"] == ["docker.io/library/nginx:latest"]
+
+
+def test_storage_delete_mark_and_security_guide(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    response = client.post(
+        "/api/storage/delete-mark",
+        json={"repo": "library/nginx", "tag": "latest", "reason": "cleanup"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    storage = client.get("/api/storage").json()
+    assert storage["deletion_marks"][0]["repo"] == "library/nginx"
+    assert "garbage-collect" in "\n".join(storage["garbage_collection"]["commands"])
+    assert client.get("/api/security-guide").json()["recommended"]

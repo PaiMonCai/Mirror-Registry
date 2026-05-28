@@ -90,3 +90,53 @@ def test_sync_run_persists_to_sqlite(tmp_path, monkeypatch):
 
     assert row["status"] == "completed"
     assert row["updated"] == 1
+
+
+def test_parse_trigger_accepts_multiple_sources(tmp_path, monkeypatch):
+    trigger_path = tmp_path / "data" / ".trigger"
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("TRIGGER_PATH", str(trigger_path))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    trigger_path.parent.mkdir(parents=True, exist_ok=True)
+    trigger_path.write_text(
+        json.dumps({"reason": "retry-run", "sources": ["docker.io/library/nginx:latest", ""]}),
+        encoding="utf-8",
+    )
+
+    assert sync_main.parse_trigger() == ("retry-run", ["docker.io/library/nginx:latest"])
+
+
+def test_copy_image_uses_exponential_retry_and_target_lock(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("SYNC_TARGET_REGISTRY", "registry:5000")
+    monkeypatch.setenv("SYNC_RETRY_BACKOFF_SECONDS", "3")
+    calls = []
+    sleeps = []
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+
+    def fake_run_command(step_name, cmd, timeout=sync_main.COMMAND_TIMEOUT_SECONDS):
+        calls.append((step_name, cmd, timeout))
+        return (len(calls) >= 3, "" if len(calls) >= 3 else "temporary")
+
+    monkeypatch.setattr(sync_main, "run_command", fake_run_command)
+    monkeypatch.setattr(sync_main.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    ok, copy_target, error = sync_main.copy_image(
+        "docker.io/library/nginx:latest",
+        "localhost:5000/library/nginx:latest",
+        retry_count=2,
+    )
+
+    assert ok is True
+    assert error == ""
+    assert copy_target == "registry:5000/library/nginx:latest"
+    assert len(calls) == 3
+    assert sleeps == [3, 6]

@@ -7,6 +7,9 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,9 +23,13 @@ TRIGGER_PATH = Path(os.getenv("TRIGGER_PATH", "/data/.trigger"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////data/mirror-registry.db")
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("COMMAND_TIMEOUT_SECONDS", "900"))
 SYNC_ENGINE = os.getenv("SYNC_ENGINE", "skopeo")
-APP_VERSION = os.getenv("APP_VERSION", "v2")
+APP_VERSION = os.getenv("APP_VERSION", "v3")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 SYNC_RETRY_COUNT = int(os.getenv("SYNC_RETRY_COUNT", "2"))
+SYNC_CONCURRENCY = int(os.getenv("SYNC_CONCURRENCY", "2"))
+SYNC_RETRY_BACKOFF_SECONDS = int(os.getenv("SYNC_RETRY_BACKOFF_SECONDS", "2"))
+DISK_LOW_BYTES = int(os.getenv("DISK_LOW_BYTES", str(2 * 1024 * 1024 * 1024)))
+NOTIFY_WEBHOOK_URL = os.getenv("NOTIFY_WEBHOOK_URL", "").strip()
 SKOPEO_COPY_ALL = os.getenv("SKOPEO_COPY_ALL", "1") != "0"
 SKOPEO_SRC_TLS_VERIFY = os.getenv("SKOPEO_SRC_TLS_VERIFY", "true").lower()
 SKOPEO_DEST_TLS_VERIFY = os.getenv("SKOPEO_DEST_TLS_VERIFY", "false").lower()
@@ -51,10 +58,21 @@ file_handler.setFormatter(fmt)
 logger.addHandler(file_handler)
 
 sync_lock = threading.Lock()
+state_lock = threading.Lock()
+target_locks_guard = threading.Lock()
+target_locks: dict[str, threading.Lock] = {}
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def bounded_int(value: object, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 def database_path() -> Path:
@@ -137,6 +155,15 @@ def init_db(conn: sqlite3.Connection) -> None:
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS deletion_marks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(repo, tag)
+        );
         """
     )
     conn.commit()
@@ -151,6 +178,16 @@ def db_write(sql: str, params: tuple = ()) -> int:
     except sqlite3.Error as exc:
         logger.warning("SQLite 写入失败: %s", exc)
         return 0
+
+
+def runtime_value(key: str, default: str = "") -> str:
+    try:
+        with connect_db() as conn:
+            row = conn.execute("SELECT value FROM runtime_state WHERE key = ?", (key,)).fetchone()
+            return str(row["value"]) if row else default
+    except sqlite3.Error as exc:
+        logger.warning("SQLite 读取运行状态失败: %s", exc)
+        return default
 
 
 def set_runtime_state(key: str, value: str) -> None:
@@ -375,18 +412,30 @@ def build_skopeo_copy_command(source: str, copy_target: str) -> list[str]:
     return cmd
 
 
-def copy_image(source: str, target: str) -> tuple[bool, str, str]:
+def get_target_lock(copy_target: str) -> threading.Lock:
+    with target_locks_guard:
+        if copy_target not in target_locks:
+            target_locks[copy_target] = threading.Lock()
+        return target_locks[copy_target]
+
+
+def copy_image(source: str, target: str, retry_count: int | None = None) -> tuple[bool, str, str]:
     copy_target = resolve_copy_target(target)
     cmd = build_skopeo_copy_command(source, copy_target)
-    for attempt in range(1, SYNC_RETRY_COUNT + 2):
-        logger.info("skopeo copy 尝试 %d/%d: %s -> %s", attempt, SYNC_RETRY_COUNT + 1, source, copy_target)
-        ok, error = run_command("copy", cmd)
-        if ok:
-            return True, copy_target, ""
-        if attempt <= SYNC_RETRY_COUNT:
-            logger.warning("copy 失败，将重试: %s", error)
-            time.sleep(min(2 * attempt, 10))
-    return False, copy_target, error
+    attempts = bounded_int(retry_count if retry_count is not None else SYNC_RETRY_COUNT, SYNC_RETRY_COUNT, 0, 10) + 1
+    with get_target_lock(copy_target):
+        last_error = ""
+        for attempt in range(1, attempts + 1):
+            logger.info("skopeo copy 尝试 %d/%d: %s -> %s", attempt, attempts, source, copy_target)
+            ok, error = run_command("copy", cmd)
+            if ok:
+                return True, copy_target, ""
+            last_error = error
+            if attempt < attempts:
+                delay = min(SYNC_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1)), 60)
+                logger.warning("copy 失败，将在 %d 秒后重试: %s", delay, error)
+                time.sleep(delay)
+    return False, copy_target, last_error
 
 
 def pull_and_push(source: str, target: str) -> bool:
@@ -398,7 +447,68 @@ def cleanup_local_tags(source: str, target: str) -> None:
     logger.info("skopeo copy 不产生本地 Docker tag，跳过本地镜像清理: %s -> %s", source, target)
 
 
-def update_heartbeat(interval: int | None = None) -> None:
+def setting_int(config: dict, name: str, default: int, minimum: int, maximum: int) -> int:
+    settings = config.get("settings", {}) if isinstance(config.get("settings", {}), dict) else {}
+    return bounded_int(settings.get(name, default), default, minimum, maximum)
+
+
+def effective_webhook_url(config: dict) -> str:
+    settings = config.get("settings", {}) if isinstance(config.get("settings", {}), dict) else {}
+    return str(settings.get("notify_webhook_url") or NOTIFY_WEBHOOK_URL).strip()
+
+
+def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> None:
+    url = webhook_url or NOTIFY_WEBHOOK_URL
+    if not url:
+        return
+    body = json.dumps(
+        {
+            "event": event_type,
+            "app": "mirror-registry",
+            "app_version": APP_VERSION,
+            "image_tag": IMAGE_TAG,
+            "created_at": now_iso(),
+            "payload": payload,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": "mirror-registry-sync"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            logger.info("webhook 通知已发送: %s HTTP %s", event_type, response.status)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        logger.warning("webhook 通知失败: %s", exc)
+
+
+def check_disk_space(run_id: int | None = None, webhook_url: str = "") -> dict:
+    try:
+        usage = shutil.disk_usage(LOG_PATH.parent)
+    except OSError as exc:
+        logger.warning("读取磁盘空间失败: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+    free_bytes = int(usage.free)
+    total_bytes = int(usage.total)
+    set_runtime_state("disk_free_bytes", str(free_bytes))
+    set_runtime_state("disk_total_bytes", str(total_bytes))
+    set_runtime_state("disk_low_threshold_bytes", str(DISK_LOW_BYTES))
+    low = DISK_LOW_BYTES > 0 and free_bytes < DISK_LOW_BYTES
+    set_runtime_state("disk_low", "true" if low else "false")
+    result = {"ok": True, "free_bytes": free_bytes, "total_bytes": total_bytes, "low": low}
+    if low:
+        message = f"磁盘剩余空间低于阈值: free={free_bytes}, threshold={DISK_LOW_BYTES}"
+        logger.warning(message)
+        record_event("WARNING", message, run_id)
+        notify_webhook("disk_low", result, webhook_url)
+    return result
+
+
+def update_heartbeat(interval: int | None = None, concurrency: int | None = None, retry_count: int | None = None) -> None:
     skopeo_path = shutil.which("skopeo") or ""
     set_runtime_state("sync_engine", SYNC_ENGINE)
     set_runtime_state("app_version", APP_VERSION)
@@ -406,29 +516,108 @@ def update_heartbeat(interval: int | None = None) -> None:
     set_runtime_state("skopeo_available", "true" if skopeo_path else "false")
     set_runtime_state("skopeo_path", skopeo_path)
     set_runtime_state("last_heartbeat", now_iso())
+    if concurrency is not None:
+        set_runtime_state("sync_concurrency", str(concurrency))
+    if retry_count is not None:
+        set_runtime_state("sync_retry_count", str(retry_count))
     if interval is not None:
         set_runtime_state("check_interval_minutes", str(interval))
         set_runtime_state("next_run_at", (datetime.now(timezone.utc) + timedelta(minutes=interval)).replace(microsecond=0).isoformat())
 
 
-def sync_all(reason: str = "scheduled", only_source: str | None = None) -> None:
+def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> str:
+    started_at = time.monotonic()
+    source = mirror["source"]
+    target = mirror["target"]
+    with state_lock:
+        cached = state.get(source)
+    item_id = create_run_item(run_id, source, target, cached)
+
+    logger.info("检查镜像: %s", source)
+    record_event("INFO", f"检查镜像: {source}", run_id, source, target)
+
+    remote, error = inspect_remote_digest(source)
+    if not remote:
+        logger.warning("跳过（无法获取 digest）: %s", source)
+        record_event("WARNING", f"无法获取 digest: {error}", run_id, source, target)
+        update_run_item(item_id, "failed", step="inspect", error=error, started_at_monotonic=started_at)
+        return "failed"
+
+    if remote == cached:
+        logger.info("无更新: %s", source)
+        record_event("INFO", "digest 未变化，跳过同步", run_id, source, target)
+        update_run_item(item_id, "skipped", new_digest=remote, step="inspect", started_at_monotonic=started_at)
+        upsert_mirror(source, target, remote)
+        return "skipped"
+
+    short_old = (cached[:19] + "...") if cached else "新镜像"
+    short_new = remote[:19] + "..."
+    logger.info("发现更新: %s  %s -> %s", source, short_old, short_new)
+    record_event("INFO", f"发现更新: {short_old} -> {short_new}", run_id, source, target)
+
+    ok, copy_target, copy_error = copy_image(source, target, retry_count=retry_count)
+    if ok:
+        with state_lock:
+            state[source] = remote
+            save_state(state)
+        upsert_mirror(source, target, remote)
+        logger.info("同步完成: %s", target)
+        record_event("INFO", "同步完成", run_id, source, target)
+        update_run_item(
+            item_id,
+            "success",
+            new_digest=remote,
+            step="copy",
+            copy_target=copy_target,
+            started_at_monotonic=started_at,
+        )
+        return "updated"
+
+    logger.error("同步失败: %s -> %s，失败步骤: copy", source, target)
+    record_event("ERROR", f"同步失败: {copy_error}", run_id, source, target)
+    update_run_item(
+        item_id,
+        "failed",
+        new_digest=remote,
+        step="copy",
+        error=copy_error,
+        copy_target=copy_target,
+        started_at_monotonic=started_at,
+    )
+    return "failed"
+
+
+def normalize_sources(only_source: str | None = None, only_sources: list[str] | None = None) -> set[str]:
+    selected = {str(item).strip() for item in (only_sources or []) if str(item).strip()}
+    if only_source:
+        selected.add(str(only_source).strip())
+    return selected
+
+
+def sync_all(reason: str = "scheduled", only_source: str | None = None, only_sources: list[str] | None = None) -> None:
     if sync_lock.locked():
         logger.warning("已有同步任务正在运行，本次触发将排队等待: %s", reason)
 
     with sync_lock:
-        run_id = create_run(reason, only_source)
+        config = load_config()
+        concurrency = setting_int(config, "sync_concurrency", SYNC_CONCURRENCY, 1, 16)
+        retry_count = setting_int(config, "sync_retry_count", SYNC_RETRY_COUNT, 0, 10)
+        interval = setting_int(config, "check_interval_minutes", 30, 1, 1440)
+        webhook_url = effective_webhook_url(config)
+        selected_sources = normalize_sources(only_source, only_sources)
+        only_label = ",".join(sorted(selected_sources)) if selected_sources else None
+        run_id = create_run(reason, only_label)
         set_runtime_state("sync_running", "true")
         set_runtime_state("sync_reason", reason)
         set_runtime_state("last_started_at", now_iso())
-        update_heartbeat()
+        update_heartbeat(interval=interval, concurrency=concurrency, retry_count=retry_count)
 
-        logger.info("===== 开始检查镜像更新（%s）=====", reason)
-        record_event("INFO", f"开始检查镜像更新（{reason}）", run_id)
-        config = load_config()
+        logger.info("===== 开始检查镜像更新（%s，并发 %d）=====", reason, concurrency)
+        record_event("INFO", f"开始检查镜像更新（{reason}，并发 {concurrency}）", run_id)
         state = load_state()
         mirrors = valid_mirrors(config)
-        if only_source:
-            mirrors = [mirror for mirror in mirrors if mirror["source"] == only_source]
+        if selected_sources:
+            mirrors = [mirror for mirror in mirrors if mirror["source"] in selected_sources]
 
         total = len(mirrors)
         updated = 0
@@ -441,69 +630,26 @@ def sync_all(reason: str = "scheduled", only_source: str | None = None) -> None:
             update_run(run_id, "completed", 0, 0, 0, 0, "镜像列表为空")
             set_runtime_state("sync_running", "false")
             set_runtime_state("last_finished_at", now_iso())
+            check_disk_space(run_id, webhook_url)
             return
 
         try:
-            for mirror in mirrors:
-                started_at = time.monotonic()
-                source = mirror["source"]
-                target = mirror["target"]
-                cached = state.get(source)
-                item_id = create_run_item(run_id, source, target, cached)
-
-                logger.info("检查镜像: %s", source)
-                record_event("INFO", f"检查镜像: {source}", run_id, source, target)
-
-                remote, error = inspect_remote_digest(source)
-                if not remote:
-                    failed += 1
-                    logger.warning("跳过（无法获取 digest）: %s", source)
-                    record_event("WARNING", f"无法获取 digest: {error}", run_id, source, target)
-                    update_run_item(item_id, "failed", step="inspect", error=error, started_at_monotonic=started_at)
-                    continue
-
-                if remote == cached:
-                    skipped += 1
-                    logger.info("无更新: %s", source)
-                    record_event("INFO", "digest 未变化，跳过同步", run_id, source, target)
-                    update_run_item(item_id, "skipped", new_digest=remote, step="inspect", started_at_monotonic=started_at)
-                    upsert_mirror(source, target, remote)
-                    continue
-
-                short_old = (cached[:19] + "...") if cached else "新镜像"
-                short_new = remote[:19] + "..."
-                logger.info("发现更新: %s  %s -> %s", source, short_old, short_new)
-                record_event("INFO", f"发现更新: {short_old} -> {short_new}", run_id, source, target)
-
-                ok, copy_target, copy_error = copy_image(source, target)
-                if ok:
-                    state[source] = remote
-                    save_state(state)
-                    upsert_mirror(source, target, remote)
-                    updated += 1
-                    logger.info("同步完成: %s", target)
-                    record_event("INFO", "同步完成", run_id, source, target)
-                    update_run_item(
-                        item_id,
-                        "success",
-                        new_digest=remote,
-                        step="copy",
-                        copy_target=copy_target,
-                        started_at_monotonic=started_at,
-                    )
-                else:
-                    failed += 1
-                    logger.error("同步失败: %s -> %s，失败步骤: copy", source, target)
-                    record_event("ERROR", f"同步失败: {copy_error}", run_id, source, target)
-                    update_run_item(
-                        item_id,
-                        "failed",
-                        new_digest=remote,
-                        step="copy",
-                        error=copy_error,
-                        copy_target=copy_target,
-                        started_at_monotonic=started_at,
-                    )
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                futures = [executor.submit(process_mirror, run_id, mirror, state, retry_count) for mirror in mirrors]
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        logger.exception("同步任务内部异常: %s", exc)
+                        record_event("ERROR", f"同步任务内部异常: {exc}", run_id)
+                        failed += 1
+                        continue
+                    if result == "updated":
+                        updated += 1
+                    elif result == "skipped":
+                        skipped += 1
+                    else:
+                        failed += 1
         finally:
             status = "failed" if failed else "completed"
             message = f"更新 {updated}，跳过 {skipped}，失败 {failed}"
@@ -512,30 +658,54 @@ def sync_all(reason: str = "scheduled", only_source: str | None = None) -> None:
             set_runtime_state("last_finished_at", now_iso())
             logger.info("===== 检查完成，本次更新 %d 个镜像，失败 %d 个 =====", updated, failed)
             record_event("INFO", f"检查完成：{message}", run_id)
+            disk = check_disk_space(run_id, webhook_url)
+            was_failed = runtime_value("last_sync_failed", "false") == "true"
+            if failed:
+                set_runtime_state("last_sync_failed", "true")
+                notify_webhook(
+                    "sync_failed",
+                    {"run_id": run_id, "reason": reason, "total": total, "updated": updated, "skipped": skipped, "failed": failed, "disk": disk},
+                    webhook_url,
+                )
+            elif was_failed:
+                set_runtime_state("last_sync_failed", "false")
+                notify_webhook(
+                    "sync_recovered",
+                    {"run_id": run_id, "reason": reason, "total": total, "updated": updated, "skipped": skipped, "failed": failed, "disk": disk},
+                    webhook_url,
+                )
+            else:
+                set_runtime_state("last_sync_failed", "false")
 
 
-def parse_trigger() -> tuple[str, str | None]:
+def parse_trigger() -> tuple[str, list[str] | None]:
     try:
         payload = json.loads(TRIGGER_PATH.read_text(encoding="utf-8"))
     except Exception:
         return "manual", None
     reason = str(payload.get("reason") or "manual")
+    sources = payload.get("sources")
+    if isinstance(sources, list):
+        clean_sources = [str(source).strip() for source in sources if str(source).strip()]
+        return reason, clean_sources or None
     source = payload.get("source")
-    return reason, str(source) if source else None
+    return reason, [str(source).strip()] if source else None
 
 
 def check_trigger() -> None:
     if TRIGGER_PATH.exists():
-        reason, source = parse_trigger()
+        reason, sources = parse_trigger()
         logger.info("收到手动同步触发")
         TRIGGER_PATH.unlink(missing_ok=True)
-        sync_all(reason, only_source=source)
+        sync_all(reason, only_sources=sources)
 
 
 if __name__ == "__main__":
     config = load_config()
-    interval = int(config.get("settings", {}).get("check_interval_minutes", 30))
-    update_heartbeat(interval)
+    interval = setting_int(config, "check_interval_minutes", 30, 1, 1440)
+    concurrency = setting_int(config, "sync_concurrency", SYNC_CONCURRENCY, 1, 16)
+    retry_count = setting_int(config, "sync_retry_count", SYNC_RETRY_COUNT, 0, 10)
+    update_heartbeat(interval, concurrency, retry_count)
 
     logger.info("同步服务启动，调度间隔: %d 分钟", interval)
     sync_all("startup")
@@ -543,5 +713,5 @@ if __name__ == "__main__":
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(sync_all, "interval", minutes=interval, id="auto_sync")
     scheduler.add_job(check_trigger, "interval", seconds=10, id="trigger_poll")
-    scheduler.add_job(lambda: update_heartbeat(interval), "interval", seconds=30, id="heartbeat")
+    scheduler.add_job(lambda: update_heartbeat(interval, concurrency, retry_count), "interval", seconds=30, id="heartbeat")
     scheduler.start()

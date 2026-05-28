@@ -49,11 +49,11 @@
     font-size: 14px;
     line-height: 1.5;
   }
-  button, input { font: inherit; }
+  button, input, textarea { font: inherit; }
   .layout {
     min-height: 100vh;
     display: grid;
-    grid-template-columns: 240px 1fr;
+    grid-template-columns: 248px 1fr;
   }
   aside {
     background: var(--surface);
@@ -62,6 +62,7 @@
     position: sticky;
     top: 0;
     height: 100vh;
+    overflow-y: auto;
   }
   .brand {
     display: flex;
@@ -70,15 +71,8 @@
     gap: 10px;
     margin-bottom: 24px;
   }
-  .brand-title {
-    font-weight: 700;
-    font-size: 17px;
-    letter-spacing: 0;
-  }
-  .brand-sub {
-    color: var(--muted);
-    font-size: 12px;
-  }
+  .brand-title { font-weight: 700; font-size: 17px; letter-spacing: 0; }
+  .brand-sub { color: var(--muted); font-size: 12px; }
   .nav { display: grid; gap: 6px; }
   .nav-btn {
     width: 100%;
@@ -111,10 +105,7 @@
     font-size: 12px;
     font-weight: 600;
   }
-  main {
-    min-width: 0;
-    padding: 24px 28px 36px;
-  }
+  main { min-width: 0; padding: 24px 28px 36px; }
   .topbar {
     display: flex;
     align-items: center;
@@ -128,8 +119,8 @@
   .view { display: none; }
   .view.active { display: block; }
   .grid { display: grid; gap: 14px; }
-  .stats { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
-  .two-col { grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr); align-items: start; }
+  .stats { grid-template-columns: repeat(5, minmax(130px, 1fr)); }
+  .two-col { grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr); align-items: start; }
   .card {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -150,11 +141,7 @@
   }
   .section-title { font-weight: 700; }
   .table-wrap { overflow-x: auto; }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    min-width: 720px;
-  }
+  table { width: 100%; border-collapse: collapse; min-width: 760px; }
   th, td {
     padding: 11px 14px;
     border-bottom: 1px solid var(--line);
@@ -199,7 +186,7 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 700; }
   .btn.danger { color: var(--err); }
   .btn.sm { min-height: 28px; padding: 4px 9px; font-size: 12px; }
-  input {
+  input, textarea {
     width: 100%;
     min-height: 36px;
     border-radius: 8px;
@@ -209,18 +196,18 @@
     padding: 8px 10px;
     outline: none;
   }
-  input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14); }
-  .form-grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
-    gap: 10px;
-    align-items: end;
+  textarea {
+    min-height: 150px;
+    resize: vertical;
+    font-family: var(--mono);
+    font-size: 12px;
   }
+  input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14); }
+  .form-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; align-items: end; }
   .field { display: grid; gap: 6px; }
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   .empty { color: var(--muted); text-align: center; padding: 28px; }
-  .log-box {
-    height: 470px;
+  .log-box, .code-box {
     overflow: auto;
     padding: 14px;
     background: var(--surface-2);
@@ -228,17 +215,15 @@
     font-size: 12px;
     border-radius: 0 0 8px 8px;
   }
+  .log-box { height: 470px; }
+  .code-box { max-height: 260px; white-space: pre-wrap; }
   .log-line { white-space: pre-wrap; word-break: break-all; margin: 0 0 5px; }
   .line-error { color: var(--err); }
   .line-warn { color: var(--warn); }
   .line-info { color: var(--accent-2); }
-  .image-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-    gap: 12px;
-    padding: 14px;
-  }
+  .image-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; padding: 14px; }
   .tag-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .split-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
   #toast {
     position: fixed;
     right: 22px;
@@ -258,10 +243,13 @@
   #toast.show { opacity: 1; transform: none; }
   #toast.err { border-color: var(--err); color: var(--err); }
   #toast.ok { border-color: var(--ok); color: var(--ok); }
+  @media (max-width: 1100px) {
+    .stats { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+  }
   @media (max-width: 920px) {
     .layout { grid-template-columns: 1fr; }
     aside { position: static; height: auto; }
-    .stats, .two-col, .form-grid { grid-template-columns: 1fr; }
+    .stats, .two-col, .form-grid, .split-form { grid-template-columns: 1fr; }
     main { padding: 18px 14px 28px; }
     .topbar { align-items: flex-start; flex-direction: column; }
   }
@@ -281,14 +269,15 @@
       <button class="nav-btn active" data-view="dashboard" onclick="switchView('dashboard')">概览</button>
       <button class="nav-btn" data-view="runs" onclick="switchView('runs')">同步任务</button>
       <button class="nav-btn" data-view="mirrors" onclick="switchView('mirrors')">镜像配置</button>
-      <button class="nav-btn" data-view="images" onclick="switchView('images')">本地仓库</button>
+      <button class="nav-btn" data-view="storage" onclick="switchView('storage')">存储管理</button>
       <button class="nav-btn" data-view="diagnostics" onclick="switchView('diagnostics')">验证诊断</button>
       <button class="nav-btn" data-view="logs" onclick="switchView('logs')">日志 / 事件</button>
+      <button class="nav-btn" data-view="security" onclick="switchView('security')">安全</button>
       <button class="nav-btn" data-view="settings" onclick="switchView('settings')">设置</button>
     </nav>
     <div class="side-panel token-row">
       <label for="tokenInput">写操作令牌</label>
-      <input type="text" id="tokenInput" placeholder="PANEL_TOKEN">
+      <input type="password" id="tokenInput" placeholder="PANEL_TOKEN">
       <button class="btn primary" onclick="saveToken()">保存令牌</button>
       <div class="muted" style="font-size:12px">令牌保存在浏览器 localStorage。</div>
     </div>
@@ -312,6 +301,7 @@
         <div class="card card-pad"><div class="metric-label">总镜像数</div><div class="metric-value" id="statTotal">—</div><div class="metric-note">配置中的镜像条目</div></div>
         <div class="card card-pad"><div class="metric-label">已同步</div><div class="metric-value" id="statSynced">—</div><div class="metric-note">已有 digest 记录</div></div>
         <div class="card card-pad"><div class="metric-label">待同步</div><div class="metric-value" id="statPending">—</div><div class="metric-note">等待首次成功同步</div></div>
+        <div class="card card-pad"><div class="metric-label">最大并发</div><div class="metric-value" id="statConcurrency">—</div><div class="metric-note">默认 2</div></div>
         <div class="card card-pad"><div class="metric-label">检查间隔</div><div class="metric-value" id="statInterval">—</div><div class="metric-note">分钟</div></div>
       </div>
       <div class="grid two-col" style="margin-top:14px">
@@ -325,6 +315,7 @@
             <div><div class="metric-label">上次开始</div><div class="mono" id="lastStarted">—</div></div>
             <div><div class="metric-label">上次结束</div><div class="mono" id="lastFinished">—</div></div>
             <div><div class="metric-label">下次检查</div><div class="mono" id="nextRun">—</div></div>
+            <div><div class="metric-label">磁盘状态</div><div id="diskStatus">—</div></div>
             <div><div class="metric-label">最近任务</div><div id="latestRun">—</div></div>
           </div>
         </div>
@@ -334,11 +325,11 @@
     <section class="view" id="view-runs">
       <div class="card">
         <div class="section-head"><div class="section-title">同步任务历史</div><button class="btn sm" onclick="loadRuns()">刷新</button></div>
-        <div class="table-wrap"><table><thead><tr><th>ID</th><th>触发</th><th>状态</th><th>统计</th><th>开始</th><th>结束</th><th>详情</th></tr></thead><tbody id="runsTable"><tr><td colspan="7" class="empty">加载中</td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>触发</th><th>状态</th><th>统计</th><th>开始</th><th>结束</th><th>操作</th></tr></thead><tbody id="runsTable"><tr><td colspan="7" class="empty">加载中</td></tr></tbody></table></div>
       </div>
       <div class="card" style="margin-top:14px">
         <div class="section-head"><div class="section-title">任务明细</div></div>
-        <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>状态</th><th>阶段</th><th>耗时</th><th>错误</th></tr></thead><tbody id="runItemsTable"><tr><td colspan="6" class="empty">选择一条任务查看明细</td></tr></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>状态</th><th>阶段</th><th>耗时</th><th>错误</th><th>操作</th></tr></thead><tbody id="runItemsTable"><tr><td colspan="7" class="empty">选择一条任务查看明细</td></tr></tbody></table></div>
       </div>
     </section>
 
@@ -355,21 +346,37 @@
           <button class="btn primary" onclick="addMirror()">添加</button>
         </div>
       </div>
+      <div class="split-form">
+        <div class="card card-pad">
+          <div class="section-title">导出配置</div>
+          <div class="actions" style="margin-top:12px"><button class="btn" onclick="exportMirrors()">导出镜像列表</button></div>
+          <textarea id="exportBox" readonly placeholder="导出的 JSON 会显示在这里"></textarea>
+        </div>
+        <div class="card card-pad">
+          <div class="section-title">导入配置</div>
+          <textarea id="importBox" placeholder='{"mirrors":[{"source":"docker.io/library/nginx:latest","target":"localhost:5000/library/nginx:latest"}],"replace":false}'></textarea>
+          <div class="actions" style="margin-top:10px">
+            <button class="btn primary" onclick="importMirrors(false)">合并导入</button>
+            <button class="btn danger" onclick="importMirrors(true)">覆盖导入</button>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <section class="view" id="view-images">
+    <section class="view" id="view-storage">
       <div class="card">
-        <div class="section-head"><div class="section-title">本地 Registry 镜像</div><button class="btn sm" onclick="loadImages()">刷新</button></div>
-        <div class="image-grid" id="imageGrid"><div class="empty">加载中</div></div>
+        <div class="section-head"><div class="section-title">本地 Registry 存储</div><button class="btn sm" onclick="loadStorage()">刷新</button></div>
+        <div class="image-grid" id="storageGrid"><div class="empty">加载中</div></div>
+      </div>
+      <div class="card" style="margin-top:14px">
+        <div class="section-head"><div class="section-title">垃圾回收操作指引</div></div>
+        <div class="code-box" id="gcGuide">加载中</div>
       </div>
     </section>
 
     <section class="view" id="view-diagnostics">
       <div class="card">
-        <div class="section-head">
-          <div class="section-title">环境验证</div>
-          <button class="btn primary" onclick="loadDiagnostics()">运行验证</button>
-        </div>
+        <div class="section-head"><div class="section-title">环境验证</div><button class="btn primary" onclick="loadDiagnostics()">运行验证</button></div>
         <div class="table-wrap"><table><thead><tr><th>检查项</th><th>结果</th><th>说明</th><th>建议</th></tr></thead><tbody id="diagnosticsTable"><tr><td colspan="4" class="empty">点击运行验证</td></tr></tbody></table></div>
       </div>
     </section>
@@ -387,14 +394,28 @@
       </div>
     </section>
 
+    <section class="view" id="view-security">
+      <div class="card">
+        <div class="section-head"><div class="section-title">公网暴露安全边界</div><button class="btn sm" onclick="loadSecurityGuide()">刷新</button></div>
+        <div class="card-pad" id="securityGuide">加载中</div>
+      </div>
+    </section>
+
     <section class="view" id="view-settings">
       <div class="card card-pad">
         <div class="section-title">同步设置</div>
-        <div class="form-grid" style="grid-template-columns:180px auto;max-width:360px;margin-top:12px">
+        <div class="form-grid" style="grid-template-columns:repeat(4,minmax(120px,1fr)) auto;margin-top:12px">
           <div class="field"><label>检查间隔（分钟）</label><input type="number" id="inInterval" min="1" max="1440"></div>
+          <div class="field"><label>最大并发</label><input type="number" id="inConcurrency" min="1" max="16"></div>
+          <div class="field"><label>最大重试</label><input type="number" id="inRetry" min="0" max="10"></div>
+          <div class="field"><label>Webhook URL</label><input id="inWebhook" placeholder="https://example.com/hook"></div>
           <button class="btn primary" onclick="saveSettings()">保存</button>
         </div>
-        <p class="muted">sync 服务会把上次/下次调度时间写入 SQLite；如果服务未重载配置，可重启 sync 容器。</p>
+        <div class="actions" style="margin-top:10px">
+          <span class="badge" id="webhookBadge">webhook: —</span>
+          <button class="btn sm danger" onclick="clearWebhook()">清除 webhook</button>
+        </div>
+        <p class="muted">并发默认 2；同一目标镜像由同步服务加锁，避免并发写入同一 tag。调度间隔变更后，如需立即生效可重启 sync 容器。</p>
       </div>
     </section>
   </main>
@@ -405,12 +426,13 @@
 <script>
 const viewMeta = {
   dashboard: ['概览', '查看同步状态、任务和环境健康度。'],
-  runs: ['同步任务', '查看每轮同步任务和每个镜像的结果。'],
-  mirrors: ['镜像配置', '维护上游镜像和本地 Registry 目标。'],
-  images: ['本地仓库', '查询 Registry 中已有镜像和 tag。'],
-  diagnostics: ['验证诊断', '检查部署环境、依赖和数据目录。'],
+  runs: ['同步任务', '查看每轮同步任务和每个镜像的结果，可重试失败项。'],
+  mirrors: ['镜像配置', '维护、导入和导出上游镜像与本地 Registry 目标。'],
+  storage: ['存储管理', '查看本地 Registry 仓库、tag、删除标记和垃圾回收指引。'],
+  diagnostics: ['验证诊断', '检查部署环境、依赖、磁盘和数据目录。'],
   logs: ['日志 / 事件', '查看文本日志和 SQLite 结构化事件。'],
-  settings: ['设置', '调整同步间隔和本地偏好。']
+  security: ['安全', '确认管理面板公网暴露边界和反向代理建议。'],
+  settings: ['设置', '调整并发、重试、定时和 webhook 通知。']
 };
 let currentView = 'dashboard';
 let writeToken = localStorage.getItem('mirrorRegistryToken') || '';
@@ -428,8 +450,8 @@ function toggleTheme() {
   applyTheme();
 }
 function switchView(name) {
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  document.querySelectorAll('.view').forEach(view => view.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(button => button.classList.toggle('active', button.dataset.view === name));
   document.getElementById('view-' + name).classList.add('active');
   document.getElementById('pageTitle').textContent = viewMeta[name][0];
   document.getElementById('pageSubtitle').textContent = viewMeta[name][1];
@@ -437,15 +459,16 @@ function switchView(name) {
   if (name === 'dashboard') loadDashboard();
   if (name === 'runs') loadRuns();
   if (name === 'mirrors') loadMirrors();
-  if (name === 'images') loadImages();
+  if (name === 'storage') loadStorage();
   if (name === 'diagnostics') loadDiagnostics();
   if (name === 'logs') { loadLogs(); loadEvents(); }
+  if (name === 'security') loadSecurityGuide();
   if (name === 'settings') loadSettings();
 }
 async function api(method, path, body) {
   const opts = { method, headers: { 'Content-Type': 'application/json' } };
   if (writeToken) opts.headers.Authorization = 'Bearer ' + writeToken;
-  if (body) opts.body = JSON.stringify(body);
+  if (body !== undefined) opts.body = JSON.stringify(body);
   const res = await fetch('/api' + path, opts);
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -483,6 +506,18 @@ function fmtTime(value) {
   if (Number.isNaN(date.getTime())) return esc(value);
   return date.toLocaleString();
 }
+function fmtBytes(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '未知';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let size = number;
+  let unit = 0;
+  while (size >= 1024 && unit < units.length - 1) {
+    size = size / 1024;
+    unit += 1;
+  }
+  return `${size.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+}
 function statusBadge(status) {
   const map = {
     ok: ['ok', '正常'],
@@ -490,6 +525,8 @@ function statusBadge(status) {
     success: ['ok', '成功'],
     skipped: ['warn', '跳过'],
     warn: ['warn', '警告'],
+    warning: ['warn', '警告'],
+    info: ['', '信息'],
     running: ['', '运行中'],
     pending: ['warn', '待同步'],
     failed: ['err', '失败'],
@@ -504,11 +541,13 @@ async function loadStatus() {
   document.getElementById('statSynced').textContent = s.synced;
   document.getElementById('statPending').textContent = s.pending;
   document.getElementById('statInterval').textContent = s.interval;
+  document.getElementById('statConcurrency').textContent = s.sync_concurrency || 2;
   document.getElementById('lastStarted').textContent = fmtTime(s.last_started_at);
   document.getElementById('lastFinished').textContent = fmtTime(s.last_finished_at);
   document.getElementById('nextRun').textContent = fmtTime(s.next_run_at);
   document.getElementById('engineBadge').textContent = 'engine: ' + (s.sync_engine || 'skopeo');
   document.getElementById('syncBadge').outerHTML = `<span class="badge ${s.is_syncing ? 'warn' : 'ok'}" id="syncBadge">${s.is_syncing ? '同步中' : '就绪'}</span>`;
+  document.getElementById('diskStatus').innerHTML = `${statusBadge(s.disk_low ? 'warning' : 'ok')} <span class="muted">${esc(fmtBytes(s.disk_free_bytes))}</span>`;
   document.getElementById('latestRun').innerHTML = s.latest_run
     ? `${statusBadge(s.latest_run.status)} <span class="muted">#${esc(s.latest_run.id)} ${esc(s.latest_run.message || '')}</span>`
     : '—';
@@ -576,6 +615,23 @@ async function triggerSync() {
   try { await api('POST', '/sync'); toast('同步已触发'); loadStatus(); }
   catch (err) { toast(err.message, 'err'); }
 }
+async function exportMirrors() {
+  try {
+    const data = await api('GET', '/mirrors/export');
+    document.getElementById('exportBox').value = JSON.stringify(data, null, 2);
+    toast('镜像列表已导出');
+  } catch (err) { toast(err.message, 'err'); }
+}
+async function importMirrors(replace) {
+  try {
+    const raw = document.getElementById('importBox').value.trim();
+    const data = JSON.parse(raw);
+    await api('POST', '/mirrors/import', { mirrors: data.mirrors || data, replace });
+    toast(replace ? '已覆盖导入镜像列表' : '已合并导入镜像列表');
+    loadMirrors();
+    loadStatus();
+  } catch (err) { toast(err.message, 'err'); }
+}
 async function loadRuns() {
   const runs = await api('GET', '/sync-runs?limit=30');
   document.getElementById('runsTable').innerHTML = runs.length ? runs.map(run => `
@@ -586,7 +642,10 @@ async function loadRuns() {
       <td>${esc(run.message || `total ${run.total}`)}</td>
       <td>${fmtTime(run.started_at)}</td>
       <td>${fmtTime(run.ended_at)}</td>
-      <td><button class="btn sm" onclick="loadRunDetail(${run.id})">查看</button></td>
+      <td><div class="actions">
+        <button class="btn sm" onclick="loadRunDetail(${run.id})">查看</button>
+        ${run.failed ? `<button class="btn sm" onclick="retryRun(${run.id})">重试失败</button>` : ''}
+      </div></td>
     </tr>`).join('') : '<tr><td colspan="7" class="empty">暂无任务历史</td></tr>';
 }
 async function loadRunDetail(id) {
@@ -599,15 +658,44 @@ async function loadRunDetail(id) {
       <td>${esc(item.step || '—')}</td>
       <td>${item.duration_ms == null ? '—' : esc(item.duration_ms + ' ms')}</td>
       <td class="muted">${esc(item.error || '')}</td>
-    </tr>`).join('') : '<tr><td colspan="6" class="empty">无明细</td></tr>';
+      <td>${item.status === 'failed' ? `<button class="btn sm" onclick="retryRunItem(${item.id})">重试</button>` : '<span class="muted">—</span>'}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">无明细</td></tr>';
 }
-async function loadImages() {
-  const list = await api('GET', '/images');
-  document.getElementById('imageGrid').innerHTML = list.length ? list.map(img => `
+async function retryRun(id) {
+  try { await api('POST', '/sync-runs/' + id + '/retry'); toast('失败镜像已加入重试'); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
+}
+async function retryRunItem(id) {
+  try { await api('POST', '/sync-run-items/' + id + '/retry'); toast('失败明细已加入重试'); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
+}
+async function loadStorage() {
+  const data = await api('GET', '/storage');
+  document.getElementById('storageGrid').innerHTML = data.images.length ? data.images.map(image => `
     <div class="card card-pad">
-      <div class="ref">${esc(img.repo)}</div>
-      <div class="tag-list">${(img.tags || []).map(tag => `<span class="badge">${esc(tag)}</span>`).join('') || '<span class="muted">无 tag</span>'}</div>
+      <div class="ref">${esc(image.repo)}</div>
+      <div class="muted" style="margin-top:4px">估算占用：${esc(fmtBytes(image.estimated_size_bytes))}</div>
+      <div class="tag-list">${(image.tags || []).map(tag => `
+        <span class="badge ${tag.marked_for_deletion ? 'warn' : ''}">
+          ${esc(tag.name)}${tag.marked_for_deletion ? ' · 删除标记' : ''}
+        </span>
+        <button class="btn sm danger" onclick="markDelete('${escAttr(image.repo)}','${escAttr(tag.name)}')">标记删除</button>
+      `).join('') || '<span class="muted">无 tag</span>'}</div>
     </div>`).join('') : '<div class="empty">仓库为空</div>';
+  document.getElementById('gcGuide').textContent = [
+    data.garbage_collection.summary,
+    '',
+    ...data.garbage_collection.commands
+  ].join('\n');
+}
+function escAttr(value) {
+  return String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '');
+}
+async function markDelete(repo, tag) {
+  const reason = prompt('删除标记原因', '准备清理无用 tag');
+  if (reason === null) return;
+  try { await api('POST', '/storage/delete-mark', { repo, tag, reason }); toast('已添加删除标记'); loadStorage(); }
+  catch (err) { toast(err.message, 'err'); }
 }
 async function loadDiagnostics() {
   const result = await api('POST', '/diagnostics/run');
@@ -621,9 +709,9 @@ async function loadDiagnostics() {
 }
 async function loadLogs() {
   const data = await api('GET', '/logs?lines=150');
-  document.getElementById('logBox').innerHTML = data.lines.map(line => {
-    let cls = /ERROR|失败/.test(line) ? 'line-error' : (/WARNING|跳过|警告/.test(line) ? 'line-warn' : 'line-info');
-    return `<div class="log-line ${cls}">${esc(line)}</div>`;
+  document.getElementById('logBox').innerHTML = data.lines.map(logLine => {
+    const cls = /ERROR|失败/.test(logLine) ? 'line-error' : (/WARNING|跳过|警告/.test(logLine) ? 'line-warn' : 'line-info');
+    return `<div class="log-line ${cls}">${esc(logLine)}</div>`;
   }).join('');
   const box = document.getElementById('logBox');
   box.scrollTop = box.scrollHeight;
@@ -637,14 +725,37 @@ async function loadEvents() {
       <td>${esc(event.message)}${event.source ? '<div class="muted ref">' + esc(event.source) + '</div>' : ''}</td>
     </tr>`).join('') : '<tr><td colspan="3" class="empty">暂无结构化事件</td></tr>';
 }
+async function loadSecurityGuide() {
+  const guide = await api('GET', '/security-guide');
+  document.getElementById('securityGuide').innerHTML = `
+    <p>${esc(guide.public_exposure_boundary)}</p>
+    <div class="tag-list">${guide.recommended.map(item => `<span class="badge">${esc(item)}</span>`).join('')}</div>
+    <div class="code-box" style="margin-top:14px">${esc(guide.nginx_basic_auth.join('\n'))}</div>
+  `;
+}
 async function loadSettings() {
   const s = await api('GET', '/settings');
   document.getElementById('inInterval').value = s.check_interval_minutes ?? 30;
+  document.getElementById('inConcurrency').value = s.sync_concurrency ?? 2;
+  document.getElementById('inRetry').value = s.sync_retry_count ?? 2;
+  document.getElementById('inWebhook').value = '';
+  document.getElementById('webhookBadge').textContent = s.notify_webhook_configured ? 'webhook: 已配置 ' + (s.notify_webhook_url_masked || '') : 'webhook: 未配置';
 }
 async function saveSettings() {
-  const value = parseInt(document.getElementById('inInterval').value, 10);
-  if (!value || value < 1) { toast('请输入有效同步间隔', 'err'); return; }
-  try { await api('PUT', '/settings', { check_interval_minutes: value }); toast('设置已保存'); loadStatus(); }
+  const check_interval_minutes = parseInt(document.getElementById('inInterval').value, 10);
+  const sync_concurrency = parseInt(document.getElementById('inConcurrency').value, 10);
+  const sync_retry_count = parseInt(document.getElementById('inRetry').value, 10);
+  const notify_webhook_url = document.getElementById('inWebhook').value.trim();
+  if (!check_interval_minutes || check_interval_minutes < 1) { toast('请输入有效同步间隔', 'err'); return; }
+  if (!sync_concurrency || sync_concurrency < 1) { toast('请输入有效最大并发', 'err'); return; }
+  if (Number.isNaN(sync_retry_count) || sync_retry_count < 0) { toast('请输入有效最大重试', 'err'); return; }
+  const body = { check_interval_minutes, sync_concurrency, sync_retry_count };
+  if (notify_webhook_url) body.notify_webhook_url = notify_webhook_url;
+  try { await api('PUT', '/settings', body); toast('设置已保存'); loadSettings(); loadStatus(); }
+  catch (err) { toast(err.message, 'err'); }
+}
+async function clearWebhook() {
+  try { await api('PUT', '/settings', { clear_notify_webhook_url: true }); toast('webhook 已清除'); loadSettings(); }
   catch (err) { toast(err.message, 'err'); }
 }
 applyTheme();

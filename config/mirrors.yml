@@ -5,3 +5,5 @@ mirrors:
 settings:
   check_interval_minutes: 30
   registry_url: http://registry:5000
+  sync_concurrency: 2
+  sync_retry_count: 2

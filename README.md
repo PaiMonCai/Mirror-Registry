@@ -8,11 +8,11 @@
 
 - `registry`：官方 `registry:2`，镜像层数据保存在 `data/registry`。
 - `panel`：FastAPI 后端和静态管理面板，默认监听 `8080` 端口。
-- `sync`：Python 同步任务，定时检查上游镜像 digest，发现变化后同步到本地 Registry。
+- `sync`：Python 同步任务，定时检查上游镜像 digest，发现变化后用 `skopeo copy` 同步到本地 Registry。
 
 ## 生产部署
 
-生产服务器直接拉取已发布镜像：
+生产服务器直接拉取已发布镜像，不在服务器上构建项目：
 
 ```powershell
 Copy-Item .env.example .env
@@ -21,6 +21,8 @@ docker compose up -d
 docker compose ps
 ```
 
+也可以把更新命令合并为一行执行：`docker compose pull && docker compose up -d`。
+
 启动后打开 `http://localhost:8080`。
 
 默认写入接口令牌是 `change-me`。如果要暴露管理面板，先在 `.env` 中设置强随机令牌：
@@ -28,8 +30,12 @@ docker compose ps
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
-APP_VERSION=v2
+APP_VERSION=v3
+SYNC_CONCURRENCY=2
 SYNC_RETRY_COUNT=2
+SYNC_RETRY_BACKOFF_SECONDS=2
+DISK_LOW_BYTES=2147483648
+NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
 ```
@@ -41,6 +47,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 管理面板会把令牌保存在浏览器 local storage 中，并在新增、修改、删除、触发同步等写操作时通过 Bearer token 发送。
+
+## v3 管理增强能力
+
+- 并发同步：`sync_concurrency` 默认 `2`，同一目标镜像写入时会加锁，避免并发写入同一个 tag。
+- 重试策略：`sync_retry_count` 控制最大重试次数，失败复制使用指数退避；面板可重试失败任务或失败明细。
+- 存储管理：面板展示本地 Registry 仓库、tag、估算占用、删除标记和垃圾回收指引。
+- 通知能力：配置 `NOTIFY_WEBHOOK_URL` 或面板 webhook 后，会发送同步失败、失败恢复和磁盘空间不足事件。
+- 认证增强：`PANEL_TOKEN` 只保护写接口；公网暴露前建议放在反向代理后，并启用 Basic Auth 或其他登录态。
+- 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
 
 ## v2 运维能力
 
@@ -71,12 +86,24 @@ mirrors:
 settings:
   check_interval_minutes: 30
   registry_url: http://registry:5000
+  sync_concurrency: 2
+  sync_retry_count: 2
 ```
 
-修改 `check_interval_minutes` 后，需要重启同步服务让调度间隔生效：
+修改 `check_interval_minutes` 后，需要重启同步服务让调度间隔立即生效：
 
 ```powershell
 docker compose restart sync
+```
+
+## 存储清理
+
+面板里的删除标记只记录清理意图。真正释放 Registry 空间需要按指引删除 manifest 后，再执行垃圾回收：
+
+```powershell
+docker compose stop registry
+docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml
+docker compose up -d registry
 ```
 
 ## 本地校验

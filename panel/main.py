@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sqlite3
 import tempfile
 from datetime import datetime, timezone
@@ -22,8 +23,9 @@ LOG_PATH = Path(os.getenv("LOG_PATH", "/data/sync.log"))
 TRIGGER_PATH = Path(os.getenv("TRIGGER_PATH", "/data/.trigger"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////data/mirror-registry.db")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://registry:5000").rstrip("/")
+REGISTRY_STORAGE_PATH = Path(os.getenv("REGISTRY_STORAGE_PATH", "/data/registry"))
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
-APP_VERSION = os.getenv("APP_VERSION", "v2")
+APP_VERSION = os.getenv("APP_VERSION", "v3")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", "/panel/static"))
@@ -34,6 +36,8 @@ IMAGE_REF_RE = re.compile(
     r"[a-z0-9]+(?:(?:[._-][a-z0-9]+)+)?"
     r"(?:/[a-z0-9]+(?:(?:[._-][a-z0-9]+)+)?)*:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$"
 )
+REPO_RE = re.compile(r"^[a-z0-9]+(?:(?:[._-][a-z0-9]+)+)?(?:/[a-z0-9]+(?:(?:[._-][a-z0-9]+)+)?)*$")
+TAG_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 
 
 class MirrorIn(BaseModel):
@@ -41,8 +45,23 @@ class MirrorIn(BaseModel):
     target: str = Field(min_length=1, max_length=255)
 
 
+class MirrorImportIn(BaseModel):
+    mirrors: list[MirrorIn] = Field(default_factory=list, max_length=500)
+    replace: bool = False
+
+
 class SettingsIn(BaseModel):
-    check_interval_minutes: int = Field(ge=1, le=1440)
+    check_interval_minutes: int | None = Field(default=None, ge=1, le=1440)
+    sync_concurrency: int | None = Field(default=None, ge=1, le=16)
+    sync_retry_count: int | None = Field(default=None, ge=0, le=10)
+    notify_webhook_url: str | None = Field(default=None, max_length=1000)
+    clear_notify_webhook_url: bool = False
+
+
+class StorageDeleteMarkIn(BaseModel):
+    repo: str = Field(min_length=1, max_length=255)
+    tag: str = Field(min_length=1, max_length=128)
+    reason: str | None = Field(default="", max_length=500)
 
 
 def now_iso() -> str:
@@ -128,6 +147,15 @@ def init_db(conn: sqlite3.Connection) -> None:
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS deletion_marks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo TEXT NOT NULL,
+            tag TEXT NOT NULL,
+            reason TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(repo, tag)
         );
         """
     )
@@ -223,6 +251,16 @@ def validate_image_ref(value: str, field_name: str) -> str:
     return image
 
 
+def validate_repo_tag(repo: str, tag: str) -> tuple[str, str]:
+    clean_repo = repo.strip()
+    clean_tag = tag.strip()
+    if not REPO_RE.match(clean_repo):
+        raise HTTPException(400, "repo 格式不合法")
+    if not TAG_RE.match(clean_tag):
+        raise HTTPException(400, "tag 格式不合法")
+    return clean_repo, clean_tag
+
+
 def valid_mirrors(config: dict) -> list[dict]:
     result = []
     for item in config.get("mirrors", []):
@@ -231,6 +269,26 @@ def valid_mirrors(config: dict) -> list[dict]:
         if source and target:
             result.append({"source": source, "target": target})
     return result
+
+
+def settings_with_defaults() -> dict:
+    settings = load_config().get("settings", {})
+    return {
+        "check_interval_minutes": int(settings.get("check_interval_minutes", 30)),
+        "registry_url": str(settings.get("registry_url") or REGISTRY_URL).rstrip("/"),
+        "sync_concurrency": int(settings.get("sync_concurrency", 2)),
+        "sync_retry_count": int(settings.get("sync_retry_count", 2)),
+        "notify_webhook_configured": bool(str(settings.get("notify_webhook_url") or os.getenv("NOTIFY_WEBHOOK_URL", "")).strip()),
+        "notify_webhook_url_masked": mask_url(str(settings.get("notify_webhook_url") or os.getenv("NOTIFY_WEBHOOK_URL", "")).strip()),
+    }
+
+
+def mask_url(value: str) -> str:
+    if not value:
+        return ""
+    if len(value) <= 18:
+        return "***"
+    return f"{value[:12]}...{value[-6:]}"
 
 
 def upsert_mirror_db(source: str, target: str, digest: str | None = None) -> None:
@@ -251,9 +309,15 @@ def delete_mirror_db(source: str) -> None:
     db_execute("DELETE FROM mirrors WHERE source = ?", (source,))
 
 
-def write_trigger(reason: str, source: str | None = None) -> None:
+def write_trigger(reason: str, source: str | None = None, sources: list[str] | None = None) -> None:
+    payload: dict = {"reason": reason}
+    clean_sources = [item.strip() for item in (sources or []) if item.strip()]
+    if clean_sources:
+        payload["sources"] = clean_sources
+    elif source:
+        payload["source"] = source.strip()
     ensure_parent(TRIGGER_PATH)
-    atomic_write_text(TRIGGER_PATH, json.dumps({"reason": reason, "source": source}, ensure_ascii=False))
+    atomic_write_text(TRIGGER_PATH, json.dumps(payload, ensure_ascii=False))
 
 
 def latest_run() -> dict | None:
@@ -270,6 +334,7 @@ def latest_run() -> dict | None:
 @app.get("/api/status")
 def get_status():
     config = load_config()
+    settings = settings_with_defaults()
     state = load_state()
     mirrors = valid_mirrors(config)
     synced = sum(1 for mirror in mirrors if state.get(mirror["source"]))
@@ -279,7 +344,9 @@ def get_status():
         "total": len(mirrors),
         "synced": synced,
         "pending": len(mirrors) - synced,
-        "interval": config.get("settings", {}).get("check_interval_minutes", 30),
+        "interval": settings["check_interval_minutes"],
+        "sync_concurrency": settings["sync_concurrency"],
+        "sync_retry_count": settings["sync_retry_count"],
         "is_syncing": running or TRIGGER_PATH.exists(),
         "auth_required": bool(PANEL_TOKEN),
         "using_default_token": PANEL_TOKEN == "change-me",
@@ -287,6 +354,8 @@ def get_status():
         "last_finished_at": runtime.get("last_finished_at", {}).get("value"),
         "next_run_at": runtime.get("next_run_at", {}).get("value"),
         "sync_engine": runtime.get("sync_engine", {}).get("value", "skopeo"),
+        "disk_free_bytes": runtime.get("disk_free_bytes", {}).get("value"),
+        "disk_low": runtime.get("disk_low", {}).get("value") == "true",
         "latest_run": latest_run(),
     }
 
@@ -326,6 +395,48 @@ def list_mirrors():
             }
         )
     return result
+
+
+@app.get("/api/mirrors/export")
+def export_mirrors():
+    config = load_config()
+    settings = settings_with_defaults()
+    safe_settings = {
+        "check_interval_minutes": settings["check_interval_minutes"],
+        "registry_url": settings["registry_url"],
+        "sync_concurrency": settings["sync_concurrency"],
+        "sync_retry_count": settings["sync_retry_count"],
+    }
+    return {"version": 1, "exported_at": now_iso(), "mirrors": valid_mirrors(config), "settings": safe_settings}
+
+
+@app.post("/api/mirrors/import", dependencies=[Depends(require_write_token)])
+def import_mirrors(body: MirrorImportIn):
+    imported: list[dict] = []
+    seen_sources: set[str] = set()
+    for item in body.mirrors:
+        source = validate_image_ref(item.source, "source")
+        target = validate_image_ref(item.target, "target")
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
+        imported.append({"source": source, "target": target})
+    if not imported:
+        raise HTTPException(400, "导入内容没有有效镜像")
+
+    config = load_config()
+    if body.replace:
+        mirrors = imported
+    else:
+        mirrors_by_source = {mirror["source"]: mirror for mirror in valid_mirrors(config)}
+        for mirror in imported:
+            mirrors_by_source[mirror["source"]] = mirror
+        mirrors = list(mirrors_by_source.values())
+    config["mirrors"] = mirrors
+    save_config(config)
+    for mirror in imported:
+        upsert_mirror_db(mirror["source"], mirror["target"])
+    return {"ok": True, "imported": len(imported), "total": len(mirrors), "replace": body.replace}
 
 
 @app.post("/api/mirrors", dependencies=[Depends(require_write_token)])
@@ -378,7 +489,7 @@ def trigger_mirror_sync(index: int):
     mirrors = valid_mirrors(config)
     if index < 0 or index >= len(mirrors):
         raise HTTPException(404, "镜像不存在")
-    write_trigger("manual-single", mirrors[index]["source"])
+    write_trigger("manual-single", source=mirrors[index]["source"])
     return {"ok": True, "message": "单镜像同步任务已触发，请稍后查看任务历史"}
 
 
@@ -390,30 +501,48 @@ def trigger_sync():
 
 @app.get("/api/settings")
 def get_settings():
-    config = load_config()
-    settings = config.get("settings", {})
-    return {"check_interval_minutes": settings.get("check_interval_minutes", 30)}
+    return settings_with_defaults()
 
 
 def get_registry_url() -> str:
-    settings = load_config().get("settings", {})
-    return str(settings.get("registry_url") or REGISTRY_URL).rstrip("/")
+    return settings_with_defaults()["registry_url"]
 
 
-@app.put("/api/settings", dependencies=[Depends(require_write_token)])
-def update_settings(body: SettingsIn):
-    config = load_config()
-    config.setdefault("settings", {})["check_interval_minutes"] = body.check_interval_minutes
-    save_config(config)
+def persist_setting(key: str, value: object) -> None:
     db_execute(
         """
         INSERT INTO settings(key, value, updated_at)
         VALUES (?, ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
         """,
-        ("check_interval_minutes", str(body.check_interval_minutes), now_iso()),
+        (key, str(value), now_iso()),
     )
-    return {"ok": True, "message": "设置已保存，sync 服务下次读取配置后生效"}
+
+
+@app.put("/api/settings", dependencies=[Depends(require_write_token)])
+def update_settings(body: SettingsIn):
+    config = load_config()
+    settings = config.setdefault("settings", {})
+    changed: dict[str, object] = {}
+    for key in ["check_interval_minutes", "sync_concurrency", "sync_retry_count"]:
+        value = getattr(body, key)
+        if value is not None:
+            settings[key] = value
+            changed[key] = value
+    if body.clear_notify_webhook_url:
+        settings.pop("notify_webhook_url", None)
+        changed["notify_webhook_url"] = ""
+    elif body.notify_webhook_url is not None:
+        url = body.notify_webhook_url.strip()
+        if url:
+            if not (url.startswith("http://") or url.startswith("https://")):
+                raise HTTPException(400, "webhook URL 必须以 http:// 或 https:// 开头")
+            settings["notify_webhook_url"] = url
+            changed["notify_webhook_url"] = mask_url(url)
+    save_config(config)
+    for key, value in changed.items():
+        persist_setting(key, value)
+    return {"ok": True, "message": "设置已保存，sync 服务下次读取配置后生效", "changed": changed}
 
 
 @app.get("/api/logs")
@@ -476,6 +605,36 @@ def get_sync_run(run_id: int):
     )
     run["items"] = items
     return run
+
+
+@app.post("/api/sync-runs/{run_id}/retry", dependencies=[Depends(require_write_token)])
+def retry_sync_run(run_id: int):
+    run = db_one("SELECT id FROM sync_runs WHERE id = ?", (run_id,))
+    if not run:
+        raise HTTPException(404, "同步任务不存在")
+    rows = db_rows(
+        """
+        SELECT source
+        FROM sync_run_items
+        WHERE run_id = ? AND status = 'failed'
+        ORDER BY id ASC
+        """,
+        (run_id,),
+    )
+    sources = list(dict.fromkeys(row["source"] for row in rows))
+    if not sources:
+        raise HTTPException(400, "该任务没有失败镜像可重试")
+    write_trigger("retry-run", sources=sources)
+    return {"ok": True, "sources": sources, "count": len(sources)}
+
+
+@app.post("/api/sync-run-items/{item_id}/retry", dependencies=[Depends(require_write_token)])
+def retry_sync_run_item(item_id: int):
+    item = db_one("SELECT source FROM sync_run_items WHERE id = ?", (item_id,))
+    if not item:
+        raise HTTPException(404, "同步任务明细不存在")
+    write_trigger("retry-item", source=item["source"])
+    return {"ok": True, "source": item["source"]}
 
 
 @app.get("/api/diagnostics")
@@ -561,11 +720,35 @@ async def run_diagnostics() -> dict:
     )
 
     try:
+        usage = shutil.disk_usage(data_parent)
+        checks.append(
+            diagnostic_item(
+                "磁盘空间",
+                "warn" if usage.free < 2 * 1024 * 1024 * 1024 else "ok",
+                f"剩余 {usage.free} / 总计 {usage.total} bytes",
+                "磁盘不足时先清理删除标记镜像并执行 Registry garbage-collect",
+                {"free_bytes": usage.free, "total_bytes": usage.total},
+            )
+        )
+    except OSError as exc:
+        checks.append(diagnostic_item("磁盘空间", "warn", f"无法读取磁盘空间: {exc}"))
+
+    try:
         with connect_db() as conn:
             conn.execute("SELECT 1")
         checks.append(diagnostic_item("SQLite", "ok", f"数据库可用: {DB_PATH}", details={"path": str(DB_PATH)}))
     except sqlite3.Error as exc:
         checks.append(diagnostic_item("SQLite", "error", f"数据库不可用: {exc}", "检查 /data 是否可写"))
+
+    settings = settings_with_defaults()
+    checks.append(
+        diagnostic_item(
+            "同步策略",
+            "ok",
+            f"并发 {settings['sync_concurrency']}，最大重试 {settings['sync_retry_count']}，webhook {'已配置' if settings['notify_webhook_configured'] else '未配置'}",
+            details={"notify_webhook_configured": settings["notify_webhook_configured"]},
+        )
+    )
 
     checks.append(
         diagnostic_item(
@@ -610,8 +793,7 @@ async def run_diagnostics() -> dict:
     }
 
 
-@app.get("/api/images")
-async def list_images():
+async def list_registry_images() -> list[dict]:
     registry_url = get_registry_url()
     async with httpx.AsyncClient() as client:
         try:
@@ -626,6 +808,11 @@ async def list_images():
             raise HTTPException(502, f"Registry 返回了无效 JSON: {exc}") from exc
 
 
+@app.get("/api/images")
+async def list_images():
+    return await list_registry_images()
+
+
 async def _get_tags(client: httpx.AsyncClient, registry_url: str, repo: str) -> dict:
     try:
         response = await client.get(f"{registry_url}/v2/{repo}/tags/list", timeout=5)
@@ -634,6 +821,119 @@ async def _get_tags(client: httpx.AsyncClient, registry_url: str, repo: str) -> 
     except (httpx.HTTPError, ValueError):
         tags = []
     return {"repo": repo, "tags": tags}
+
+
+def directory_size(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    total = 0
+    try:
+        for file_path in path.rglob("*"):
+            if file_path.is_file():
+                total += file_path.stat().st_size
+    except OSError:
+        return None
+    return total
+
+
+def estimate_repo_size(repo: str) -> int | None:
+    return directory_size(REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2" / "repositories" / repo)
+
+
+def gc_guide() -> dict:
+    return {
+        "summary": "删除标记只记录清理意图。真正释放空间需要先删除 Registry manifest，再停 registry 执行 garbage-collect。",
+        "commands": [
+            "docker compose pull",
+            "docker compose stop registry",
+            "docker compose run --rm registry registry garbage-collect /etc/docker/registry/config.yml",
+            "docker compose up -d registry",
+        ],
+    }
+
+
+@app.get("/api/storage")
+async def get_storage():
+    registry_error = ""
+    try:
+        images = await list_registry_images()
+    except HTTPException as exc:
+        registry_error = str(exc.detail)
+        images = []
+    marks = db_rows(
+        """
+        SELECT id, repo, tag, reason, created_at
+        FROM deletion_marks
+        ORDER BY id DESC
+        """
+    )
+    mark_by_ref = {f"{mark['repo']}:{mark['tag']}": mark for mark in marks}
+    enriched = []
+    for image in images:
+        repo = image["repo"]
+        repo_size = estimate_repo_size(repo)
+        enriched.append(
+            {
+                "repo": repo,
+                "estimated_size_bytes": repo_size,
+                "tags": [
+                    {
+                        "name": tag,
+                        "marked_for_deletion": f"{repo}:{tag}" in mark_by_ref,
+                        "deletion_mark": mark_by_ref.get(f"{repo}:{tag}"),
+                    }
+                    for tag in image.get("tags", [])
+                ],
+            }
+        )
+    total_storage = directory_size(REGISTRY_STORAGE_PATH)
+    return {
+        "images": enriched,
+        "deletion_marks": marks,
+        "registry_storage_path": str(REGISTRY_STORAGE_PATH),
+        "estimated_total_bytes": total_storage,
+        "registry_error": registry_error,
+        "garbage_collection": gc_guide(),
+    }
+
+
+@app.post("/api/storage/delete-mark", dependencies=[Depends(require_write_token)])
+def mark_image_for_delete(body: StorageDeleteMarkIn):
+    repo, tag = validate_repo_tag(body.repo, body.tag)
+    mark_id = db_execute(
+        """
+        INSERT INTO deletion_marks(repo, tag, reason, created_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(repo, tag) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at
+        """,
+        (repo, tag, body.reason or "", now_iso()),
+    )
+    return {"ok": True, "id": mark_id, "repo": repo, "tag": tag}
+
+
+@app.delete("/api/storage/delete-mark/{mark_id}", dependencies=[Depends(require_write_token)])
+def unmark_image_for_delete(mark_id: int):
+    db_execute("DELETE FROM deletion_marks WHERE id = ?", (mark_id,))
+    return {"ok": True}
+
+
+@app.get("/api/security-guide")
+def get_security_guide():
+    return {
+        "public_exposure_boundary": "不要把 8080 面板端口直接暴露到公网。PANEL_TOKEN 只保护写操作，不等于完整登录系统。",
+        "recommended": [
+            "通过 Nginx、Caddy 或 Traefik 放在内网入口后面。",
+            "在反向代理层启用 Basic Auth 或单点登录，只允许可信 IP 访问。",
+            "仍然保留强随机 PANEL_TOKEN，作为写接口的第二层保护。",
+        ],
+        "nginx_basic_auth": [
+            "location / {",
+            "  auth_basic \"Mirror Registry\";",
+            "  auth_basic_user_file /etc/nginx/.htpasswd;",
+            "  proxy_pass http://127.0.0.1:8080;",
+            "}",
+        ],
+    }
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
