@@ -170,6 +170,7 @@ def test_mirror_export_import(panel_app):
     assert response.status_code == 200
     exported = client.get("/api/mirrors/export").json()
     assert exported["mirrors"][0]["source"] == "docker.io/library/nginx:latest"
+    assert exported["version"] == 2
 
 
 def test_retry_failed_run_writes_sources_trigger(panel_app):
@@ -219,3 +220,70 @@ def test_storage_delete_mark_and_security_guide(panel_app):
     assert storage["deletion_marks"][0]["repo"] == "library/nginx"
     assert "garbage-collect" in "\n".join(storage["garbage_collection"]["commands"])
     assert client.get("/api/security-guide").json()["recommended"]
+
+
+def test_v4_registry_group_platform_and_audit(panel_app):
+    client, config_path, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    registry_response = client.post(
+        "/api/registries",
+        json={"id": "prod", "name": "Production", "url": "https://registry.example.com", "copy_host": "registry.example.com"},
+        headers=headers,
+    )
+    group_response = client.post(
+        "/api/mirror-groups",
+        json={
+            "id": "prod-app",
+            "name": "Prod App",
+            "project": "app",
+            "environment": "prod",
+            "namespace": "library",
+            "registry": "prod",
+        },
+        headers=headers,
+    )
+    mirror_response = client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/nginx:latest",
+            "target": "registry.example.com/library/nginx:latest",
+            "registry": "prod",
+            "group": "prod-app",
+            "project": "app",
+            "environment": "prod",
+            "namespace": "library",
+        },
+        headers=headers,
+    )
+
+    assert registry_response.status_code == 200
+    assert group_response.status_code == 200
+    assert mirror_response.status_code == 200
+    platform = client.get("/api/platform").json()
+    grouped = client.get("/api/platform/groups").json()
+    audit = client.get("/api/audit-logs").json()
+    assert any(item["id"] == "prod" for item in platform["registries"])
+    assert grouped[0]["project"] == "app"
+    assert grouped[0]["environment"] == "prod"
+    assert any(item["resource_type"] == "mirror" and item["action"] == "create" for item in audit)
+    assert "mirror_groups" in config_path.read_text(encoding="utf-8")
+
+
+def test_v4_database_configuration_guide(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    response = client.put(
+        "/api/settings",
+        json={"database_url": "postgresql://mirror:password@postgres:5432/mirror_registry"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    settings = client.get("/api/settings").json()
+    guide = client.get("/api/database-guide").json()
+    diagnostics = client.post("/api/diagnostics/run").json()
+    assert settings["database_backend"] == "postgresql"
+    assert guide["supported_backends"] == ["sqlite", "postgresql", "mysql"]
+    assert any(item["name"] == "数据库后端" for item in diagnostics["checks"])

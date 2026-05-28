@@ -46,8 +46,47 @@ def test_valid_mirrors_skips_bad_entries(tmp_path, monkeypatch):
         {
             "source": "docker.io/library/nginx:latest",
             "target": "localhost:5000/library/nginx:latest",
+            "registry": "local",
+            "group": "default",
+            "project": "default",
+            "environment": "local",
+            "namespace": "library",
         }
     ]
+
+
+def test_valid_mirrors_keeps_v4_group_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    mirrors = sync_main.valid_mirrors(
+        {
+            "mirror_groups": [
+                {
+                    "id": "prod-app",
+                    "project": "app",
+                    "environment": "prod",
+                    "namespace": "library",
+                    "registry": "prod",
+                }
+            ],
+            "mirrors": [
+                {
+                    "source": "docker.io/library/nginx:latest",
+                    "target": "registry.example.com/library/nginx:latest",
+                    "group": "prod-app",
+                }
+            ],
+        }
+    )
+
+    assert mirrors[0]["registry"] == "prod"
+    assert mirrors[0]["group"] == "prod-app"
+    assert mirrors[0]["project"] == "app"
+    assert mirrors[0]["environment"] == "prod"
 
 
 def test_skopeo_copy_command_rewrites_local_registry(tmp_path, monkeypatch):

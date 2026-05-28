@@ -16,10 +16,10 @@ services:
       STATE_PATH: /data/sync-state.json
       LOG_PATH: /data/sync.log
       TRIGGER_PATH: /data/.trigger
-      DATABASE_URL: sqlite:////data/mirror-registry.db
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/mirror-registry.db}
       REGISTRY_URL: http://registry:5000
       REGISTRY_STORAGE_PATH: /data/registry
-      APP_VERSION: v3
+      APP_VERSION: v4
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
     ports:
@@ -38,9 +38,9 @@ services:
       STATE_PATH: /data/sync-state.json
       LOG_PATH: /data/sync.log
       TRIGGER_PATH: /data/.trigger
-      DATABASE_URL: sqlite:////data/mirror-registry.db
+      DATABASE_URL: ${DATABASE_URL:-sqlite:////data/mirror-registry.db}
       SYNC_ENGINE: skopeo
-      APP_VERSION: v3
+      APP_VERSION: v4
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       SYNC_RETRY_COUNT: ${SYNC_RETRY_COUNT:-2}
       SYNC_CONCURRENCY: ${SYNC_CONCURRENCY:-2}

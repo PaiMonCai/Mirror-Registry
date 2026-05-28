@@ -30,7 +30,8 @@ The default write API token is `change-me`. Set a real token in `.env` before ex
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
-APP_VERSION=v3
+APP_VERSION=v4
+DATABASE_URL=sqlite:////data/mirror-registry.db
 SYNC_CONCURRENCY=2
 SYNC_RETRY_COUNT=2
 SYNC_RETRY_BACKOFF_SECONDS=2
@@ -57,6 +58,15 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Authentication boundary: `PANEL_TOKEN` protects write APIs only. Put the panel behind a reverse proxy with Basic Auth or another login layer before exposing it publicly.
 - Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
 
+## v4 Platform Extensions
+
+- Multiple Registry targets: `config/mirrors.yml` supports `registries`, and the panel can manage Registry targets.
+- Multiple mirror groups: `mirror_groups` organize mirrors by project, environment, namespace, and Registry.
+- Grouped views: the Platform page groups mirrors by project, environment, namespace, and mirror group.
+- External database configuration: SQLite remains the default; `DATABASE_URL` or `settings.database_url` can reserve PostgreSQL/MySQL configuration.
+- Audit logs: panel write operations and important sync actions are stored in `audit_logs` and shown in the Audit page.
+- Extension assessment: the panel documents single-node, multi-instance, remote worker, and queued sync modes while keeping single-node Compose as the default path.
+
 ## v2 Operations
 
 - `sync` uses `skopeo copy` and no longer depends on host Docker CLI or `/var/run/docker.sock`.
@@ -82,10 +92,16 @@ Edit `config/mirrors.yml` or use the panel:
 mirrors:
   - source: docker.io/library/nginx:latest
     target: localhost:5000/library/nginx:latest
+    registry: local
+    group: default
+    project: default
+    environment: local
+    namespace: library
 
 settings:
   check_interval_minutes: 30
   registry_url: http://registry:5000
+  database_url: sqlite:////data/mirror-registry.db
   sync_concurrency: 2
   sync_retry_count: 2
 ```

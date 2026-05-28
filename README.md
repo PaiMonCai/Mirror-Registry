@@ -30,7 +30,8 @@ docker compose ps
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
-APP_VERSION=v3
+APP_VERSION=v4
+DATABASE_URL=sqlite:////data/mirror-registry.db
 SYNC_CONCURRENCY=2
 SYNC_RETRY_COUNT=2
 SYNC_RETRY_BACKOFF_SECONDS=2
@@ -57,6 +58,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 认证增强：`PANEL_TOKEN` 只保护写接口；公网暴露前建议放在反向代理后，并启用 Basic Auth 或其他登录态。
 - 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
 
+## v4 平台化扩展能力
+
+- 多 Registry 目标：`config/mirrors.yml` 支持 `registries`，面板提供 Registry 目标管理入口。
+- 多镜像组：`mirror_groups` 可按项目、环境、命名空间和 Registry 组织镜像。
+- 分组展示：面板「平台配置」页按项目、环境、命名空间和镜像组聚合展示。
+- 外部数据库配置：默认仍使用 SQLite；可通过 `DATABASE_URL` 或 `settings.database_url` 预留 PostgreSQL/MySQL 配置。
+- 审计日志：面板写操作和 sync 关键操作会写入 `audit_logs`，面板「审计」页可查看。
+- 扩展评估：面板提供单机、多实例、远程 worker、队列化同步的状态说明；默认部署路径仍是单机 compose。
+
 ## v2 运维能力
 
 - `sync` 使用 `skopeo copy` 同步镜像，不再依赖宿主机 Docker CLI，也不再挂载 `/var/run/docker.sock`。
@@ -82,10 +92,16 @@ docker compose -f docker-compose.dev.yml ps
 mirrors:
   - source: docker.io/library/nginx:latest
     target: localhost:5000/library/nginx:latest
+    registry: local
+    group: default
+    project: default
+    environment: local
+    namespace: library
 
 settings:
   check_interval_minutes: 30
   registry_url: http://registry:5000
+  database_url: sqlite:////data/mirror-registry.db
   sync_concurrency: 2
   sync_retry_count: 2
 ```
