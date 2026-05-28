@@ -20,6 +20,8 @@ TRIGGER_PATH = Path(os.getenv("TRIGGER_PATH", "/data/.trigger"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////data/mirror-registry.db")
 COMMAND_TIMEOUT_SECONDS = int(os.getenv("COMMAND_TIMEOUT_SECONDS", "900"))
 SYNC_ENGINE = os.getenv("SYNC_ENGINE", "skopeo")
+APP_VERSION = os.getenv("APP_VERSION", "v2")
+IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 SYNC_RETRY_COUNT = int(os.getenv("SYNC_RETRY_COUNT", "2"))
 SKOPEO_COPY_ALL = os.getenv("SKOPEO_COPY_ALL", "1") != "0"
 SKOPEO_SRC_TLS_VERIFY = os.getenv("SKOPEO_SRC_TLS_VERIFY", "true").lower()
@@ -399,6 +401,8 @@ def cleanup_local_tags(source: str, target: str) -> None:
 def update_heartbeat(interval: int | None = None) -> None:
     skopeo_path = shutil.which("skopeo") or ""
     set_runtime_state("sync_engine", SYNC_ENGINE)
+    set_runtime_state("app_version", APP_VERSION)
+    set_runtime_state("image_tag", IMAGE_TAG)
     set_runtime_state("skopeo_available", "true" if skopeo_path else "false")
     set_runtime_state("skopeo_path", skopeo_path)
     set_runtime_state("last_heartbeat", now_iso())

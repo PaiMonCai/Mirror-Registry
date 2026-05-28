@@ -28,6 +28,7 @@ The default write API token is `change-me`. Set a real token in `.env` before ex
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
+APP_VERSION=v2
 SYNC_RETRY_COUNT=2
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
@@ -46,7 +47,7 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - `sync` uses `skopeo copy` and no longer depends on host Docker CLI or `/var/run/docker.sock`.
 - Runtime data is stored in SQLite by default: `data/mirror-registry.db`.
 - The panel has a sync runs view for each run and per-image result.
-- The panel has a diagnostics view for Registry, config, data, SQLite, and sync heartbeat checks.
+- The panel has a diagnostics view for Registry, config, data, SQLite, current image tag, app version, and sync heartbeat checks.
 - The UI defaults to a light operations theme. Dark theme and write token preferences are stored in browser local storage.
 
 ## Local Development

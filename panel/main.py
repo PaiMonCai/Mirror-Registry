@@ -23,6 +23,8 @@ TRIGGER_PATH = Path(os.getenv("TRIGGER_PATH", "/data/.trigger"))
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////data/mirror-registry.db")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://registry:5000").rstrip("/")
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
+APP_VERSION = os.getenv("APP_VERSION", "v2")
+IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", "/panel/static"))
 if not STATIC_DIR.exists():
@@ -564,6 +566,16 @@ async def run_diagnostics() -> dict:
         checks.append(diagnostic_item("SQLite", "ok", f"数据库可用: {DB_PATH}", details={"path": str(DB_PATH)}))
     except sqlite3.Error as exc:
         checks.append(diagnostic_item("SQLite", "error", f"数据库不可用: {exc}", "检查 /data 是否可写"))
+
+    checks.append(
+        diagnostic_item(
+            "版本信息",
+            "ok",
+            f"app={APP_VERSION}, image_tag={IMAGE_TAG}",
+            "如果这里不是预期版本，执行 docker compose pull 后重新创建服务",
+            {"app_version": APP_VERSION, "image_tag": IMAGE_TAG},
+        )
+    )
 
     runtime = runtime_state()
     skopeo_available = runtime.get("skopeo_available", {}).get("value")

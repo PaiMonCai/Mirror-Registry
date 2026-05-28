@@ -28,6 +28,7 @@ docker compose ps
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
 MIRROR_REGISTRY_IMAGE_TAG=latest
+APP_VERSION=v2
 SYNC_RETRY_COUNT=2
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
@@ -46,7 +47,7 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - `sync` 使用 `skopeo copy` 同步镜像，不再依赖宿主机 Docker CLI，也不再挂载 `/var/run/docker.sock`。
 - 运行数据默认写入 SQLite：`data/mirror-registry.db`。
 - 面板提供「同步任务」页，展示每轮同步任务和每个镜像的结果。
-- 面板提供「验证诊断」页，检查 Registry、配置目录、数据目录、SQLite 和 sync 心跳。
+- 面板提供「验证诊断」页，检查 Registry、配置目录、数据目录、SQLite、当前镜像 tag、版本信息和 sync 心跳。
 - UI 默认浅色主题，深色主题和写操作令牌都保存在浏览器 local storage。
 
 ## 本地开发

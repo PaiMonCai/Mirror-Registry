@@ -89,6 +89,8 @@ def require_compose_shape() -> None:
         "./config:/config",
         "./data:/data",
         "DATABASE_URL: sqlite:////data/mirror-registry.db",
+        "APP_VERSION: v2",
+        "MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}",
         "SYNC_ENGINE: skopeo",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
@@ -118,6 +120,8 @@ def require_compose_shape() -> None:
         "./config:/config",
         "./data:/data",
         "DATABASE_URL: sqlite:////data/mirror-registry.db",
+        "APP_VERSION: v2",
+        "MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}",
         "SYNC_ENGINE: skopeo",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
@@ -221,6 +225,9 @@ def require_panel_features() -> None:
         "PANEL_TOKEN",
         "Depends(require_write_token)",
         "DATABASE_URL",
+        "APP_VERSION",
+        "IMAGE_TAG",
+        "版本信息",
         "sync_runs",
         "sync_run_items",
         "log_events",
@@ -268,6 +275,8 @@ def require_sync_features() -> None:
         "COMMAND_TIMEOUT_SECONDS",
         "DATABASE_URL",
         "SYNC_ENGINE",
+        "APP_VERSION",
+        "IMAGE_TAG",
         "skopeo",
         "copy",
         "--all",
@@ -342,6 +351,7 @@ def require_tests_and_docs() -> None:
         "skopeo copy",
         "data/mirror-registry.db",
         "验证诊断",
+        "当前镜像 tag",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -358,6 +368,7 @@ def require_tests_and_docs() -> None:
         "v2 Operations",
         "skopeo copy",
         "data/mirror-registry.db",
+        "current image tag",
         "docker compose pull",
         "docker compose -f docker-compose.dev.yml up -d --build",
         "Development Images",
@@ -366,7 +377,7 @@ def require_tests_and_docs() -> None:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
     env_example = read(".env.example")
-    for snippet in ["PANEL_TOKEN=", "MIRROR_REGISTRY_IMAGE_TAG=latest", "SYNC_RETRY_COUNT=2", "SKOPEO_COPY_ALL=1"]:
+    for snippet in ["PANEL_TOKEN=", "MIRROR_REGISTRY_IMAGE_TAG=latest", "APP_VERSION=v2", "SYNC_RETRY_COUNT=2", "SKOPEO_COPY_ALL=1"]:
         if snippet not in env_example:
             fail(f".env.example missing {snippet!r}")
     dev_requirements = read("requirements-dev.txt")
