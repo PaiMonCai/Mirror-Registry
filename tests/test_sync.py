@@ -301,3 +301,49 @@ def test_sync_records_tag_written_audit_on_success(tmp_path, monkeypatch):
         row = conn.execute("SELECT action, resource_id, detail FROM audit_logs WHERE action = 'tag_written'").fetchone()
     assert row["resource_id"] == "library/busybox:latest"
     assert "sha256:new" in row["detail"]
+
+
+def test_scheduled_policy_runs_due_push_and_updates_status(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("STATE_PATH", str(tmp_path / "data" / "sync-state.json"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("SYNC_TARGET_REGISTRY", "registry:5000")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.db_write(
+        """
+        INSERT INTO scheduled_push_policies(
+            id, name, source, target, cron, enabled, allow_latest, next_run_at, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "nightly-plan",
+            "Nightly plan",
+            "docker.io/library/busybox:latest",
+            "localhost:5000/library/busybox:nightly",
+            "*/30 * * * *",
+            1,
+            0,
+            "2024-01-01T00:00:00+00:00",
+            sync_main.now_iso(),
+            sync_main.now_iso(),
+        ),
+    )
+    monkeypatch.setattr(sync_main, "load_credentials", lambda: [])
+    monkeypatch.setattr(sync_main, "inspect_remote_digest", lambda image, authfile="": ("sha256:nightly", ""))
+    monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": (True, "registry:5000/library/busybox:nightly", ""))
+
+    sync_main.check_scheduled_policies()
+
+    with sync_main.connect_db() as conn:
+        policy = conn.execute("SELECT last_run_at, next_run_at, last_error FROM scheduled_push_policies WHERE id = ?", ("nightly-plan",)).fetchone()
+        run = conn.execute("SELECT reason, status, updated FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert policy["last_run_at"]
+    assert policy["next_run_at"]
+    assert policy["last_error"] == ""
+    assert run["reason"] == "scheduled-policy:nightly-plan"
+    assert run["status"] == "completed"
+    assert run["updated"] == 1

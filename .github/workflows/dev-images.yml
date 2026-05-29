@@ -1,6 +1,9 @@
 name: Dev Images
 
 on:
+  schedule:
+    # Runs at 02:17 Beijing time (18:17 UTC) and never publishes latest.
+    - cron: "17 18 * * *"
   workflow_dispatch:
     inputs:
       image_tag:
@@ -49,6 +52,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve dev image tag
+        id: dev_tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "image_tag=nightly-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+            echo "ref_label=scheduled-nightly-utc" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+            echo "ref_label=${{ inputs.ref_label }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push dev image
         uses: docker/build-push-action@v6
         with:
@@ -56,12 +71,12 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ inputs.image_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:${{ steps.dev_tag.outputs.image_tag }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}:dev-${{ github.sha }}
           labels: |
             org.opencontainers.image.title=Mirror Registry ${{ matrix.service }} dev
             org.opencontainers.image.description=Development image for Mirror Registry ${{ matrix.service }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.ref.name=${{ inputs.ref_label }}
+            org.opencontainers.image.ref.name=${{ steps.dev_tag.outputs.ref_label }}
           cache-from: type=gha,scope=dev-${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=dev-${{ matrix.service }}

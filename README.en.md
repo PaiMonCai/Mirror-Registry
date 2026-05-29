@@ -68,6 +68,15 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - The backup checklist covers `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, and `CREDENTIALS_SECRET_KEY`; restore should run read-only validation before starting sync.
 - The security guide separates the panel HTTPS entry from the Registry `/v2/` HTTPS entry, and sync does not need an exposed inbound port.
 
+## Automated Publishing and Scheduled Push
+
+- The `Dev Images` workflow supports manual dispatch and nightly schedule. Scheduled images publish `nightly-YYYYMMDD` and `dev-<sha>` only; they never overwrite release `latest`.
+- Release images are still triggered only by `v*` tags, and `latest` continues to mean the latest release.
+- The Scheduled Push page creates business image push policies. Policies are disabled by default; cron is UTC, for example `0 18 * * *` is 02:00 Beijing time.
+- Each policy shows enabled state, last run, next run, and latest error.
+- Manual runs, create/update operations, and sync execution results are audited. Failures appear in run history, text logs, events, and webhook notifications.
+- Scheduled push refuses `latest` unless explicitly allowed, and tag protection rules still apply.
+
 ## v3 Management
 
 - Concurrent sync: `sync_concurrency` defaults to `2`; the sync worker locks each target image so the same tag is not written concurrently.

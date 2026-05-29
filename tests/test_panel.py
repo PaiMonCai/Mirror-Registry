@@ -488,3 +488,48 @@ def test_backup_restore_guide_and_verify(panel_app):
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+
+def test_schedules_default_disabled_and_trigger_policy_run(panel_app):
+    client, _, _, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    disabled_latest = client.post(
+        "/api/schedules",
+        json={
+            "id": "latest-plan",
+            "name": "Latest plan",
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+            "cron": "0 18 * * *",
+        },
+        headers=headers,
+    )
+    assert disabled_latest.status_code == 200
+    assert disabled_latest.json()["schedule"]["enabled"] is False
+    blocked_run = client.post("/api/schedules/latest-plan/run", json={}, headers=headers)
+    assert blocked_run.status_code == 409
+
+    enabled = client.post(
+        "/api/schedules",
+        json={
+            "id": "nightly-plan",
+            "name": "Nightly plan",
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:nightly",
+            "cron": "*/30 * * * *",
+            "enabled": True,
+        },
+        headers=headers,
+    )
+    assert enabled.status_code == 200
+    schedule = enabled.json()["schedule"]
+    assert schedule["enabled"] is True
+    assert schedule["next_run_at"]
+
+    run = client.post("/api/schedules/nightly-plan/run", json={}, headers=headers)
+    assert run.status_code == 200
+    trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
+    assert trigger["reason"] == "scheduled-policy:nightly-plan"
+    audit = client.get("/api/audit-logs").json()
+    assert any(item["resource_type"] == "scheduled_push_policy" and item["action"] == "run" for item in audit)

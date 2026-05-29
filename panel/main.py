@@ -140,6 +140,18 @@ class BackupRestoreVerifyIn(BaseModel):
     require_credentials_secret: bool = True
 
 
+class ScheduledPushPolicyIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    source: str = Field(min_length=1, max_length=255)
+    target: str = Field(min_length=1, max_length=255)
+    cron: str = Field(default="0 18 * * *", min_length=1, max_length=120)
+    enabled: bool = False
+    allow_latest: bool = False
+    source_credential_id: str | None = Field(default=None, max_length=64)
+    target_credential_id: str | None = Field(default=None, max_length=64)
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -269,6 +281,23 @@ CREATE TABLE IF NOT EXISTS retention_policies (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scheduled_push_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    target TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    allow_latest INTEGER NOT NULL DEFAULT 0,
+    source_credential_id TEXT,
+    target_credential_id TEXT,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -393,6 +422,24 @@ POSTGRES_SCHEMA_STATEMENTS = [
         keep_last INTEGER NOT NULL,
         max_age_days INTEGER,
         enabled INTEGER NOT NULL DEFAULT 0,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS scheduled_push_policies (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        source VARCHAR(255) NOT NULL,
+        target VARCHAR(255) NOT NULL,
+        cron VARCHAR(120) NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        allow_latest INTEGER NOT NULL DEFAULT 0,
+        source_credential_id VARCHAR(64),
+        target_credential_id VARCHAR(64),
+        last_run_at VARCHAR(64),
+        next_run_at VARCHAR(64),
+        last_error TEXT,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
     )
@@ -917,6 +964,76 @@ def retention_dry_run(policy: dict) -> dict:
             else:
                 candidates.append(entry)
     return {"policy": public, "candidates": candidates, "skipped_protected": skipped_protected}
+
+
+def next_run_from_cron(cron: str, base: datetime | None = None) -> str:
+    now = (base or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        return (now + timedelta(hours=24)).isoformat()
+    minute, hour, day, month, weekday = parts
+    if day == month == weekday == "*" and minute.startswith("*/") and hour == "*":
+        try:
+            interval = max(1, min(int(minute[2:]), 1440))
+        except ValueError:
+            interval = 1440
+        return (now + timedelta(minutes=interval)).isoformat()
+    if day == month == weekday == "*":
+        try:
+            target_minute = int(minute)
+            target_hour = int(hour)
+        except ValueError:
+            return (now + timedelta(hours=24)).isoformat()
+        candidate = now.replace(hour=target_hour, minute=target_minute)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        return candidate.isoformat()
+    return (now + timedelta(hours=24)).isoformat()
+
+
+def scheduled_policy_row(policy_id: str) -> dict:
+    clean_id = validate_slug(policy_id, "schedule_id")
+    row = db_one(
+        """
+        SELECT id, name, source, target, cron, enabled, allow_latest, source_credential_id, target_credential_id,
+               last_run_at, next_run_at, last_error, created_at, updated_at
+        FROM scheduled_push_policies
+        WHERE id = ?
+        """,
+        (clean_id,),
+    )
+    if not row:
+        raise HTTPException(404, "计划推送策略不存在")
+    return row
+
+
+def public_scheduled_policy(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "source": row["source"],
+        "target": row["target"],
+        "cron": row["cron"],
+        "enabled": bool(row["enabled"]),
+        "allow_latest": bool(row["allow_latest"]),
+        "source_credential_id": row.get("source_credential_id") or "",
+        "target_credential_id": row.get("target_credential_id") or "",
+        "last_run_at": row.get("last_run_at") or "",
+        "next_run_at": row.get("next_run_at") or "",
+        "last_error": row.get("last_error") or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def assert_scheduled_policy_allowed(source: str, target: str, allow_latest: bool) -> tuple[str, str]:
+    validate_image_ref(source, "source")
+    validate_image_ref(target, "target")
+    repo, tag = image_repo_tag(target)
+    if tag == "latest" and not allow_latest:
+        raise HTTPException(409, "计划推送默认不允许覆盖 latest，必须显式 allow_latest")
+    assert_tag_mutation_allowed(repo, tag, "scheduled-push")
+    return repo, tag
 
 
 def validate_registry_url(value: str) -> str:
@@ -1949,6 +2066,91 @@ def apply_retention_policy(policy_id: str):
         created.append(f"{candidate['repo']}:{candidate['tag']}")
     audit_log("apply", "retention_policy", row["id"], {"marked": created, "skipped_protected": len(result["skipped_protected"])})
     return {"ok": True, "marked": created, "dry_run": result}
+
+
+@app.get("/api/schedules")
+def list_schedules():
+    rows = db_rows(
+        """
+        SELECT id, name, source, target, cron, enabled, allow_latest, source_credential_id, target_credential_id,
+               last_run_at, next_run_at, last_error, created_at, updated_at
+        FROM scheduled_push_policies
+        ORDER BY id
+        """
+    )
+    return [public_scheduled_policy(row) for row in rows]
+
+
+@app.post("/api/schedules", dependencies=[Depends(require_write_token)])
+def upsert_schedule(body: ScheduledPushPolicyIn):
+    if body.enabled:
+        assert_scheduled_policy_allowed(body.source, body.target, body.allow_latest)
+    else:
+        validate_image_ref(body.source, "source")
+        validate_image_ref(body.target, "target")
+    schedule_id = validate_slug(body.id or slug_candidate(body.name, "schedule"), "schedule_id")
+    now = now_iso()
+    existing = db_one("SELECT id, created_at, last_run_at, last_error FROM scheduled_push_policies WHERE id = ?", (schedule_id,))
+    params = (
+        schedule_id,
+        body.name.strip(),
+        body.source.strip(),
+        body.target.strip(),
+        body.cron.strip(),
+        1 if body.enabled else 0,
+        1 if body.allow_latest else 0,
+        optional_slug(body.source_credential_id, "source_credential_id"),
+        optional_slug(body.target_credential_id, "target_credential_id"),
+        existing.get("last_run_at") if existing else "",
+        next_run_from_cron(body.cron) if body.enabled else "",
+        existing.get("last_error") if existing else "",
+        existing["created_at"] if existing else now,
+        now,
+    )
+    if existing:
+        db_execute(
+            """
+            UPDATE scheduled_push_policies
+            SET name = ?, source = ?, target = ?, cron = ?, enabled = ?, allow_latest = ?,
+                source_credential_id = ?, target_credential_id = ?, next_run_at = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (params[1], params[2], params[3], params[4], params[5], params[6], params[7], params[8], params[10], params[13], schedule_id),
+        )
+    else:
+        db_execute(
+            """
+            INSERT INTO scheduled_push_policies(
+                id, name, source, target, cron, enabled, allow_latest, source_credential_id, target_credential_id,
+                last_run_at, next_run_at, last_error, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+    audit_log("upsert", "scheduled_push_policy", schedule_id, {"source": body.source, "target": body.target, "cron": body.cron, "enabled": body.enabled, "allow_latest": body.allow_latest})
+    return {"ok": True, "schedule": public_scheduled_policy(scheduled_policy_row(schedule_id))}
+
+
+@app.delete("/api/schedules/{schedule_id}", dependencies=[Depends(require_write_token)])
+def delete_schedule(schedule_id: str):
+    row = scheduled_policy_row(schedule_id)
+    db_execute("DELETE FROM scheduled_push_policies WHERE id = ?", (row["id"],))
+    audit_log("delete", "scheduled_push_policy", row["id"], {})
+    return {"ok": True}
+
+
+@app.post("/api/schedules/{schedule_id}/run", dependencies=[Depends(require_write_token)])
+def run_schedule(schedule_id: str):
+    row = scheduled_policy_row(schedule_id)
+    assert_scheduled_policy_allowed(row["source"], row["target"], bool(row["allow_latest"]))
+    db_execute(
+        "UPDATE scheduled_push_policies SET next_run_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        (datetime.now(timezone.utc).replace(microsecond=0).isoformat(), "", now_iso(), row["id"]),
+    )
+    write_trigger(f"scheduled-policy:{row['id']}")
+    audit_log("run", "scheduled_push_policy", row["id"], {"source": row["source"], "target": row["target"]})
+    return {"ok": True, "message": "计划推送已排队", "schedule": public_scheduled_policy(scheduled_policy_row(row["id"]))}
 
 
 @app.get("/api/storage")

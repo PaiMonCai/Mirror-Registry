@@ -100,6 +100,8 @@ h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
 .credentials-form { grid-template-columns: repeat(3, minmax(160px, 1fr)); }
 .row-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .search { display: flex; align-items: center; gap: 6px; min-width: 260px; }
+.checkline { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; color: var(--muted); }
+.checkline input { width: auto; min-height: 0; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
 .chip, .badge {
   display: inline-flex;

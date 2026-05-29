@@ -68,6 +68,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 备份恢复清单覆盖 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env` 和 `CREDENTIALS_SECRET_KEY`，恢复时先做只读验证再启动 sync。
 - 安全指南区分管理面板 HTTPS 入口和 Registry `/v2/` HTTPS 入口，sync 不需要暴露入站端口。
 
+## 自动发布与计划推送
+
+- `Dev Images` workflow 支持手动触发和 nightly 定时触发，定时镜像只发布 `nightly-YYYYMMDD` 和 `dev-<sha>`，不会覆盖正式 `latest`。
+- 正式镜像仍只由 `v*` tag 触发，`latest` 继续代表最新正式版本。
+- 面板「计划推送」页可创建业务镜像推送策略，默认关闭；cron 使用 UTC，例如 `0 18 * * *` 对应北京时间 02:00。
+- 计划推送会显示启用状态、上次运行、下次运行和最近失败原因。
+- 手动运行、创建、修改和 sync 执行结果都会写入审计；失败会进入任务历史、文本日志、事件和 webhook。
+- 计划推送默认不允许覆盖 `latest`，必须显式勾选允许，并且仍会受到 tag 保护规则约束。
+
 ## v3 管理增强能力
 
 - 并发同步：`sync_concurrency` 默认 `2`，同一目标镜像写入时会加锁，避免并发写入同一个 tag。

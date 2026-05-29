@@ -298,6 +298,10 @@ def require_panel_features() -> None:
         "verify_backup_restore_readiness",
         "search_storage",
         "get_storage_image_detail",
+        "list_schedules",
+        "upsert_schedule",
+        "run_schedule",
+        "assert_scheduled_policy_allowed",
     ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
@@ -351,6 +355,9 @@ def require_panel_features() -> None:
         "protected_environment",
         "release_tag",
         "CREDENTIALS_SECRET_KEY",
+        "@app.get(\"/api/schedules\")",
+        "scheduled_push_policies",
+        "计划推送默认不允许覆盖 latest",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -393,6 +400,9 @@ def require_sync_features() -> None:
         "load_tag_protection_rules",
         "tag_protection_reasons",
         "image_repo_tag",
+        "load_due_scheduled_policies",
+        "process_scheduled_policy",
+        "check_scheduled_policies",
     ]:
         if name not in function_names:
             fail(f"sync/sync.py missing function {name}")
@@ -436,6 +446,9 @@ def require_sync_features() -> None:
         "tag_protection_rules",
         "copy_blocked",
         "tag_written",
+        "scheduled_push_policies",
+        "scheduled-policy:",
+        "scheduled_push_failed",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -473,6 +486,8 @@ def require_frontend_features() -> None:
         "/retention-policies",
         "/backup-restore-guide",
         "仓库治理",
+        "/schedules",
+        "计划推送",
         "sync_concurrency",
         "Webhook URL",
         "平台配置",
@@ -538,6 +553,8 @@ def require_tests_and_docs() -> None:
         "/api/retention-policies",
         "/api/backup-restore-guide",
         "tag_written",
+        "/api/schedules",
+        "scheduled-policy:",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -565,6 +582,7 @@ def require_tests_and_docs() -> None:
         "导入导出",
         "仓库治理",
         "CREDENTIALS_SECRET_KEY",
+        "计划推送",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -595,6 +613,7 @@ def require_tests_and_docs() -> None:
         "Import/export",
         "Repository Governance",
         "CREDENTIALS_SECRET_KEY",
+        "Scheduled Push",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -672,6 +691,8 @@ def require_release_workflow() -> None:
 def require_dev_workflow() -> None:
     workflow = read(".github/workflows/dev-images.yml")
     required_snippets = [
+        "schedule:",
+        "cron: \"17 18 * * *\"",
         "workflow_dispatch:",
         "image_tag:",
         "ref_label:",
@@ -683,15 +704,16 @@ def require_dev_workflow() -> None:
         "mirror-registry-sync",
         "platforms: linux/amd64",
         "push: true",
-        ":${{ inputs.image_tag }}",
+        "nightly-$(date -u +%Y%m%d)",
+        ":${{ steps.dev_tag.outputs.image_tag }}",
         ":dev-${{ github.sha }}",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in workflow]
     if missing:
         fail(f"dev workflow missing snippets: {missing}")
-    if "tags:\n      -" in workflow or "branches:" in workflow:
-        fail("dev workflow must be manually dispatched, not triggered by push")
-    ok("manual dev workflow publishes GHCR dev images")
+    if "branches:" in workflow or ":latest" in workflow:
+        fail("dev workflow must not publish on branch pushes or overwrite latest")
+    ok("manual and scheduled dev workflow publishes GHCR dev images without touching latest")
 
 
 def main() -> None:

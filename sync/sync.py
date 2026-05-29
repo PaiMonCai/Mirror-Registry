@@ -167,6 +167,23 @@ CREATE TABLE IF NOT EXISTS tag_protection_rules (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS scheduled_push_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    target TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    allow_latest INTEGER NOT NULL DEFAULT 0,
+    source_credential_id TEXT,
+    target_credential_id TEXT,
+    last_run_at TEXT,
+    next_run_at TEXT,
+    last_error TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -278,6 +295,24 @@ POSTGRES_SCHEMA_STATEMENTS = [
         environment VARCHAR(64) NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         reason TEXT,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS scheduled_push_policies (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        source VARCHAR(255) NOT NULL,
+        target VARCHAR(255) NOT NULL,
+        cron VARCHAR(120) NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        allow_latest INTEGER NOT NULL DEFAULT 0,
+        source_credential_id VARCHAR(64),
+        target_credential_id VARCHAR(64),
+        last_run_at VARCHAR(64),
+        next_run_at VARCHAR(64),
+        last_error TEXT,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
     )
@@ -721,6 +756,87 @@ def tag_protection_reasons(repo: str, tag: str, environment: str = "", rules: li
     return reasons
 
 
+def parse_iso(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def next_run_from_cron(cron: str, base: datetime | None = None) -> str:
+    now = (base or datetime.now(timezone.utc)).replace(second=0, microsecond=0)
+    parts = cron.strip().split()
+    if len(parts) != 5:
+        return (now + timedelta(hours=24)).isoformat()
+    minute, hour, day, month, weekday = parts
+    if day == month == weekday == "*" and minute.startswith("*/") and hour == "*":
+        try:
+            interval = max(1, min(int(minute[2:]), 1440))
+        except ValueError:
+            interval = 1440
+        return (now + timedelta(minutes=interval)).isoformat()
+    if day == month == weekday == "*":
+        try:
+            target_minute = int(minute)
+            target_hour = int(hour)
+        except ValueError:
+            return (now + timedelta(hours=24)).isoformat()
+        candidate = now.replace(hour=target_hour, minute=target_minute)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        return candidate.isoformat()
+    return (now + timedelta(hours=24)).isoformat()
+
+
+def load_due_scheduled_policies(force: bool = False) -> list[dict]:
+    rows = db_rows(
+        """
+        SELECT id, name, source, target, cron, enabled, allow_latest, source_credential_id, target_credential_id,
+               last_run_at, next_run_at, last_error
+        FROM scheduled_push_policies
+        WHERE enabled = 1
+        ORDER BY id
+        """
+    )
+    now = datetime.now(timezone.utc)
+    due = []
+    for row in rows:
+        next_run_at = str(row.get("next_run_at") or "")
+        if force or not next_run_at or parse_iso(next_run_at) <= now:
+            due.append(row)
+    return due
+
+
+def load_scheduled_policy(policy_id: str) -> dict | None:
+    rows = db_rows(
+        """
+        SELECT id, name, source, target, cron, enabled, allow_latest, source_credential_id, target_credential_id,
+               last_run_at, next_run_at, last_error
+        FROM scheduled_push_policies
+        WHERE id = ?
+        """,
+        (policy_id,),
+    )
+    return rows[0] if rows else None
+
+
+def update_scheduled_policy_result(policy_id: str, cron: str, error: str = "") -> None:
+    db_write(
+        """
+        UPDATE scheduled_push_policies
+        SET last_run_at = ?, next_run_at = ?, last_error = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+            next_run_from_cron(cron),
+            error,
+            now_iso(),
+            policy_id,
+        ),
+    )
+
+
 def credential_fernet() -> Fernet | None:
     secret = CREDENTIALS_SECRET_KEY.strip()
     if not secret:
@@ -1114,6 +1230,41 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
         remove_temp_authfile(authfile)
 
 
+def process_scheduled_policy(policy: dict, retry_count: int) -> str:
+    source = policy["source"]
+    target = policy["target"]
+    allow_latest = bool(policy.get("allow_latest"))
+    if image_repo_tag(resolve_copy_target(target))[1] == "latest" and not allow_latest:
+        message = f"计划推送默认不允许覆盖 latest: {target}"
+        logger.warning(message)
+        audit_log("copy_blocked", "scheduled_push_policy", policy["id"], {"source": source, "target": target, "reason": "latest"})
+        update_scheduled_policy_result(policy["id"], policy["cron"], message)
+        return "failed"
+    mirror = {
+        "source": source,
+        "target": target,
+        "environment": policy.get("environment") or "local",
+        "source_credential_id": policy.get("source_credential_id") or "",
+        "target_credential_id": policy.get("target_credential_id") or "",
+    }
+    run_id = create_run(f"scheduled-policy:{policy['id']}", source)
+    state = load_state()
+    result = process_mirror(run_id, mirror, state, retry_count)
+    update_run(
+        run_id,
+        "completed" if result in {"updated", "skipped"} else "failed",
+        1,
+        1 if result == "updated" else 0,
+        1 if result == "skipped" else 0,
+        1 if result == "failed" else 0,
+        result,
+    )
+    error = "" if result == "updated" else "scheduled push failed"
+    update_scheduled_policy_result(policy["id"], policy["cron"], error)
+    audit_log("run", "scheduled_push_policy", policy["id"], {"source": source, "target": target, "result": result})
+    return result
+
+
 def normalize_sources(only_source: str | None = None, only_sources: list[str] | None = None) -> set[str]:
     selected = {str(item).strip() for item in (only_sources or []) if str(item).strip()}
     if only_source:
@@ -1221,6 +1372,23 @@ def sync_all(reason: str = "scheduled", only_source: str | None = None, only_sou
                 set_runtime_state("last_sync_failed", "false")
 
 
+def check_scheduled_policies(force: bool = False) -> None:
+    config = load_config()
+    retry_count = setting_int(config, "sync_retry_count", SYNC_RETRY_COUNT, 0, 10)
+    policies = load_due_scheduled_policies(force=force)
+    if not policies:
+        return
+    logger.info("开始执行计划推送策略: %d", len(policies))
+    for policy in policies:
+        result = process_scheduled_policy(policy, retry_count)
+        if result == "failed":
+            notify_webhook(
+                "scheduled_push_failed",
+                {"policy_id": policy["id"], "source": policy["source"], "target": policy["target"], "result": result},
+                effective_webhook_url(config),
+            )
+
+
 def parse_trigger() -> tuple[str, list[str] | None]:
     try:
         payload = json.loads(TRIGGER_PATH.read_text(encoding="utf-8"))
@@ -1240,6 +1408,17 @@ def check_trigger() -> None:
         reason, sources = parse_trigger()
         logger.info("收到手动同步触发")
         TRIGGER_PATH.unlink(missing_ok=True)
+        if reason.startswith("scheduled-policy:"):
+            policy_id = reason.split(":", 1)[1]
+            policy = load_scheduled_policy(policy_id)
+            if policy:
+                config = load_config()
+                retry_count = setting_int(config, "sync_retry_count", SYNC_RETRY_COUNT, 0, 10)
+                process_scheduled_policy(policy, retry_count)
+            return
+        if reason == "scheduled-policy":
+            check_scheduled_policies(force=True)
+            return
         sync_all(reason, only_sources=sources)
 
 
@@ -1256,5 +1435,6 @@ if __name__ == "__main__":
     scheduler = BlockingScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(sync_all, "interval", minutes=interval, id="auto_sync")
     scheduler.add_job(check_trigger, "interval", seconds=10, id="trigger_poll")
+    scheduler.add_job(check_scheduled_policies, "interval", seconds=60, id="scheduled_push_poll")
     scheduler.add_job(lambda: update_heartbeat(interval, concurrency, retry_count), "interval", seconds=30, id="heartbeat")
     scheduler.start()

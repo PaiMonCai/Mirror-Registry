@@ -30,6 +30,7 @@ type View =
   | 'mirrors'
   | 'credentials'
   | 'governance'
+  | 'schedules'
   | 'platform'
   | 'storage'
   | 'diagnostics'
@@ -44,6 +45,7 @@ const viewMeta: Record<View, { title: string; subtitle: string; icon: React.Reac
   mirrors: { title: '镜像配置', subtitle: '维护、导入和导出上游镜像与目标 Registry。', icon: <Boxes size={18} /> },
   credentials: { title: '仓库凭据', subtitle: '加密保存源仓库和目标仓库认证信息。', icon: <KeyRound size={18} /> },
   governance: { title: '仓库治理', subtitle: '保护关键 tag、执行保留策略 dry-run 和查看恢复清单。', icon: <ShieldCheck size={18} /> },
+  schedules: { title: '计划推送', subtitle: '管理业务镜像的定时推送策略和最近失败原因。', icon: <History size={18} /> },
   platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <Archive size={18} /> },
   storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <HardDrive size={18} /> },
   diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <ListChecks size={18} /> },
@@ -83,6 +85,7 @@ function App() {
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<AnyRecord[]>([]);
   const [governance, setGovernance] = useState<AnyRecord>({ rules: [], policies: [], backup: {} });
+  const [schedules, setSchedules] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(() => token), [token]);
@@ -160,6 +163,10 @@ function App() {
     setGovernance({ rules, policies, backup });
   }
 
+  async function loadSchedules() {
+    setSchedules(await api('GET', '/schedules'));
+  }
+
   useEffect(() => {
     loadStatus().catch((error) => notify(error.message));
   }, []);
@@ -174,6 +181,10 @@ function App() {
       }
       if (view === 'credentials') await loadCredentials();
       if (view === 'governance') await loadGovernance();
+      if (view === 'schedules') {
+        await loadSchedules();
+        await loadCredentials();
+      }
       if (view === 'platform') await loadPlatform();
       if (view === 'storage') await loadStorage();
       if (view === 'diagnostics') await loadDiagnostics();
@@ -251,6 +262,7 @@ function App() {
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
+        {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
         {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
         {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
@@ -417,6 +429,42 @@ function Governance({ governance, api, reload, notify }: any) {
         {dryRun && <pre>{JSON.stringify(dryRun, null, 2)}</pre>}
       </Panel>
       <Panel title="备份恢复清单"><pre>{JSON.stringify(governance.backup || {}, null, 2)}</pre></Panel>
+    </div>
+  );
+}
+
+function Schedules({ schedules, credentials, api, reload, notify }: any) {
+  const [form, setForm] = useState({ id: '', name: '', source: '', target: '', cron: '0 18 * * *', enabled: false, allow_latest: false, source_credential_id: '', target_credential_id: '' });
+  async function save() {
+    await api('POST', '/schedules', { ...form, id: form.id || undefined });
+    setForm({ id: '', name: '', source: '', target: '', cron: '0 18 * * *', enabled: false, allow_latest: false, source_credential_id: '', target_credential_id: '' });
+    await reload();
+    notify('计划推送已保存');
+  }
+  async function run(id: string) {
+    await api('POST', `/schedules/${id}/run`, {});
+    await reload();
+    notify('计划推送已排队');
+  }
+  return (
+    <div className="stack">
+      <Panel title="新增计划">
+        <div className="form-grid">
+          <input placeholder="id" value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} />
+          <input placeholder="名称" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input placeholder="源镜像" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} />
+          <input placeholder="目标镜像" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} />
+          <input placeholder="UTC cron，例如 0 18 * * *" value={form.cron} onChange={(e) => setForm({ ...form, cron: e.target.value })} />
+          <select value={form.source_credential_id} onChange={(e) => setForm({ ...form, source_credential_id: e.target.value })}><option value="">源凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <select value={form.target_credential_id} onChange={(e) => setForm({ ...form, target_credential_id: e.target.value })}><option value="">目标凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <label className="checkline"><input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />启用</label>
+          <label className="checkline"><input type="checkbox" checked={form.allow_latest} onChange={(e) => setForm({ ...form, allow_latest: e.target.checked })} />允许 latest</label>
+          <button className="primary" onClick={save}>保存计划</button>
+        </div>
+      </Panel>
+      <Panel title="计划列表">
+        <table><thead><tr><th>ID</th><th>源</th><th>目标</th><th>Cron</th><th>启用</th><th>上次</th><th>下次</th><th>最近错误</th><th>操作</th></tr></thead><tbody>{schedules.map((item: AnyRecord) => <tr key={item.id}><td>{item.id}</td><td>{item.source}</td><td>{item.target}</td><td>{item.cron}</td><td><Badge value={item.enabled ? 'enabled' : 'disabled'} /></td><td>{item.last_run_at || '-'}</td><td>{item.next_run_at || '-'}</td><td>{item.last_error || '-'}</td><td><button onClick={() => run(item.id)}>运行</button></td></tr>)}</tbody></table>
+      </Panel>
     </div>
   );
 }
