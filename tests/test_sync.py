@@ -210,6 +210,78 @@ def test_parse_trigger_accepts_multiple_sources(tmp_path, monkeypatch):
     assert sync_main.parse_trigger() == ("retry-run", ["docker.io/library/busybox:latest"])
 
 
+def test_check_trigger_converts_legacy_trigger_to_queue(tmp_path, monkeypatch):
+    trigger_path = tmp_path / "data" / ".trigger"
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("TRIGGER_PATH", str(trigger_path))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    calls = []
+
+    def fake_sync_all(reason, only_source=None, only_sources=None, queue_id=None):
+        calls.append({"reason": reason, "only_sources": only_sources, "queue_id": queue_id})
+        return {"status": "completed", "run_id": 77, "message": "ok"}
+
+    monkeypatch.setattr(sync_main, "sync_all", fake_sync_all)
+    trigger_path.parent.mkdir(parents=True, exist_ok=True)
+    trigger_path.write_text(
+        json.dumps({"reason": "retry-run", "sources": ["docker.io/library/busybox:latest"]}),
+        encoding="utf-8",
+    )
+
+    sync_main.check_trigger()
+
+    assert not trigger_path.exists()
+    assert calls == [{"reason": "retry-run", "only_sources": ["docker.io/library/busybox:latest"], "queue_id": 1}]
+    row = sync_main.db_one("SELECT reason, sources, status, attempts, run_id FROM sync_queue WHERE id = ?", (1,))
+    assert row["reason"] == "retry-run"
+    assert json.loads(row["sources"]) == ["docker.io/library/busybox:latest"]
+    assert row["status"] == "completed"
+    assert row["attempts"] == 1
+    assert row["run_id"] == 77
+
+
+def test_sync_queue_consumes_task_and_recovers_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    task = sync_main.enqueue_sync_queue_task("manual-single", source="docker.io/library/busybox:latest", priority=10)
+    calls = []
+
+    def fake_sync_all(reason, only_source=None, only_sources=None, queue_id=None):
+        calls.append({"reason": reason, "only_sources": only_sources, "queue_id": queue_id})
+        return {"status": "completed", "run_id": 123, "message": "ok"}
+
+    monkeypatch.setattr(sync_main, "sync_all", fake_sync_all)
+
+    assert sync_main.process_sync_queue() == 1
+    row = sync_main.sync_queue_row(task["id"])
+    assert calls == [{"reason": "manual-single", "only_sources": ["docker.io/library/busybox:latest"], "queue_id": task["id"]}]
+    assert row["status"] == "completed"
+    assert row["attempts"] == 1
+    assert row["run_id"] == 123
+    assert row["message"] == "ok"
+
+    now = sync_main.now_iso()
+    stale_id = sync_main.db_write(
+        """
+        INSERT INTO sync_queue(reason, sources, priority, status, dedupe_key, scheduled_at, attempts, created_at, updated_at, started_at, message)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("manual", "[]", 100, "running", "stale", now, 1, now, now, now, "running"),
+    )
+    sync_main.recover_stale_queue_tasks()
+    stale = sync_main.sync_queue_row(stale_id)
+    assert stale["status"] == "queued"
+    assert stale["message"] == "recovered after worker restart"
+
+
 def test_copy_image_uses_exponential_retry_and_target_lock(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
@@ -393,13 +465,24 @@ def test_scheduled_policy_runs_due_push_and_updates_status(tmp_path, monkeypatch
     monkeypatch.setattr(sync_main, "copy_image", lambda source, target, retry_count=0, authfile="": (True, "registry:5000/library/busybox:nightly", ""))
 
     sync_main.check_scheduled_policies()
+    with sync_main.connect_db() as conn:
+        queued = conn.execute("SELECT reason, status, attempts FROM sync_queue ORDER BY id DESC LIMIT 1").fetchone()
+    assert queued["reason"] == "scheduled-policy:nightly-plan"
+    assert queued["status"] == "queued"
+    assert queued["attempts"] == 0
+
+    assert sync_main.process_sync_queue() == 1
 
     with sync_main.connect_db() as conn:
         policy = conn.execute("SELECT last_run_at, next_run_at, last_error FROM scheduled_push_policies WHERE id = ?", ("nightly-plan",)).fetchone()
         run = conn.execute("SELECT reason, status, updated FROM sync_runs ORDER BY id DESC LIMIT 1").fetchone()
+        queue = conn.execute("SELECT status, attempts, run_id FROM sync_queue ORDER BY id DESC LIMIT 1").fetchone()
     assert policy["last_run_at"]
     assert policy["next_run_at"]
     assert policy["last_error"] == ""
     assert run["reason"] == "scheduled-policy:nightly-plan"
     assert run["status"] == "completed"
     assert run["updated"] == 1
+    assert queue["status"] == "completed"
+    assert queue["attempts"] == 1
+    assert queue["run_id"]

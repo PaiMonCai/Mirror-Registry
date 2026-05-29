@@ -141,6 +141,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - 手动运行、创建、修改和 sync 执行结果都会写入审计；失败会进入任务历史、文本日志、事件和 webhook。
 - 计划推送默认不允许覆盖 `latest`，必须显式勾选允许，并且仍会受到 tag 保护规则约束。
 
+## 同步队列
+
+- 手动同步、单镜像同步、导入后同步、计划推送和失败重试都会进入 SQLite 持久化 `sync_queue`，worker 按优先级消费。
+- 面板「同步任务」页展示同步队列，可对 `queued` 任务暂停、恢复、取消，也可对 `completed`、`failed`、`canceled` 任务重放。
+- API 可通过 `GET /api/sync-queue` 查看队列，并通过 `/api/sync-queue/{id}/pause`、`resume`、`cancel`、`replay` 控制任务。
+- worker 启动时会把未完成的 `running` / `cancel_requested` 任务恢复为可重试队列项，旧 `.trigger` 文件仍会被兼容转换为队列任务。
+
 ## 镜像体积统计
 
 - 存储页支持后台重算 manifest/blob 统计，默认读取 SQLite 缓存，不在页面请求中执行重型全量扫描。

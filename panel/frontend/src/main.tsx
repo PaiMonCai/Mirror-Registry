@@ -14,14 +14,17 @@ import {
   LogOut,
   LockKeyhole,
   Moon,
+  Pause,
   Play,
   RefreshCw,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
   Sun,
   Trash2,
   UserRound,
+  XCircle,
 } from 'lucide-react';
 import { ApiError, createApiClient } from './api';
 import './styles.css';
@@ -45,7 +48,7 @@ type View =
 
 const viewMeta: Record<View, { title: string; subtitle: string; icon: React.ReactNode }> = {
   dashboard: { title: '概览', subtitle: '运行状态、同步心跳和关键操作。', icon: <Gauge size={18} /> },
-  runs: { title: '同步任务', subtitle: '查看每轮同步和失败重试入口。', icon: <History size={18} /> },
+  runs: { title: '同步任务', subtitle: '查看同步队列、执行历史和失败重试入口。', icon: <History size={18} /> },
   mirrors: { title: '镜像配置', subtitle: '维护、导入和导出上游镜像与目标 Registry。', icon: <Boxes size={18} /> },
   credentials: { title: '仓库凭据', subtitle: '加密保存源仓库和目标仓库认证信息。', icon: <KeyRound size={18} /> },
   governance: { title: '仓库治理', subtitle: '保护关键 tag、执行保留策略 dry-run 和查看恢复清单。', icon: <ShieldCheck size={18} /> },
@@ -99,6 +102,7 @@ function App() {
   const [observability, setObservability] = useState<AnyRecord>({});
   const [mirrors, setMirrors] = useState<AnyRecord[]>([]);
   const [runs, setRuns] = useState<AnyRecord[]>([]);
+  const [syncQueue, setSyncQueue] = useState<AnyRecord[]>([]);
   const [selectedRun, setSelectedRun] = useState<AnyRecord | null>(null);
   const [platform, setPlatform] = useState<AnyRecord>({});
   const [grouped, setGrouped] = useState<AnyRecord[]>([]);
@@ -163,7 +167,12 @@ function App() {
   }
 
   async function loadRuns() {
-    setRuns(await api('GET', '/sync-runs?limit=30'));
+    const [runRows, queueRows] = await Promise.all([
+      api('GET', '/sync-runs?limit=30'),
+      api('GET', '/sync-queue?limit=50'),
+    ]);
+    setRuns(runRows);
+    setSyncQueue(queueRows);
   }
 
   async function loadObservability() {
@@ -314,14 +323,14 @@ function App() {
             <button className="ghost" onClick={() => action('已退出登录', logout)} title="退出登录">
               <LogOut size={16} />
             </button>
-            <button className="primary" onClick={() => action('同步已触发', async () => { await api('POST', '/sync'); await loadStatus(); })}>
+            <button className="primary" onClick={() => action('同步已入队', async () => { await api('POST', '/sync'); await loadStatus(); if (view === 'runs') await loadRuns(); })}>
               <Play size={16} />立即同步
             </button>
           </div>
         </header>
 
         {view === 'dashboard' && <Dashboard status={status} ops={opsSummary} api={api} notify={notify} reload={() => action('已刷新', loadStatus)} />}
-        {view === 'runs' && <Runs runs={runs} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
+        {view === 'runs' && <Runs runs={runs} syncQueue={syncQueue} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
@@ -449,12 +458,47 @@ function Panel({ title, action, children }: { title: string; action?: React.Reac
   return <section className="panel"><div className="panel-head"><h2>{title}</h2>{action}</div>{children}</section>;
 }
 
-function Runs({ runs, selectedRun, setSelectedRun, api, reload, notify }: any) {
+function Runs({ runs, syncQueue, selectedRun, setSelectedRun, api, reload, notify }: any) {
   async function openRun(id: number) {
     setSelectedRun(await api('GET', `/sync-runs/${id}`));
   }
+  async function queueAction(id: number, action: string, label: string) {
+    await api('POST', `/sync-queue/${id}/${action}`, {});
+    await reload();
+    notify(label);
+  }
+  const queueRows = syncQueue || [];
   return (
     <div className="stack">
+      <Panel title="同步队列" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        {queueRows.length === 0 ? <p className="warn">当前没有同步队列任务。</p> : (
+          <table><thead><tr><th>ID</th><th>原因</th><th>状态</th><th>镜像</th><th>优先级</th><th>尝试</th><th>Run</th><th>消息</th><th>时间</th><th>操作</th></tr></thead>
+            <tbody>{queueRows.map((task: AnyRecord) => {
+              const status = String(task.status || '');
+              const terminal = ['completed', 'failed', 'canceled'].includes(status);
+              return (
+                <tr key={task.id}>
+                  <td>{task.id}</td>
+                  <td>{task.reason}</td>
+                  <td><Badge value={status} /></td>
+                  <td className="breakable mono">{(task.sources || []).join(', ') || '全部镜像'}</td>
+                  <td>{task.priority}</td>
+                  <td>{task.attempts}</td>
+                  <td>{task.run_id ? <button onClick={() => openRun(task.run_id)}>#{task.run_id}</button> : '-'}</td>
+                  <td>{task.message || '-'}</td>
+                  <td>{task.started_at || task.scheduled_at || task.created_at}</td>
+                  <td className="row-actions">
+                    {status === 'queued' && <button onClick={() => queueAction(task.id, 'pause', '队列任务已暂停')}><Pause size={14} />暂停</button>}
+                    {status === 'paused' && <button onClick={() => queueAction(task.id, 'resume', '队列任务已恢复')}><Play size={14} />恢复</button>}
+                    {['queued', 'paused', 'running'].includes(status) && <button onClick={() => queueAction(task.id, 'cancel', '队列任务已取消')}><XCircle size={14} />取消</button>}
+                    {terminal && <button onClick={() => queueAction(task.id, 'replay', '队列任务已重放')}><RotateCcw size={14} />重放</button>}
+                  </td>
+                </tr>
+              );
+            })}</tbody>
+          </table>
+        )}
+      </Panel>
       <Panel title="任务历史" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
         <table><thead><tr><th>ID</th><th>原因</th><th>状态</th><th>更新</th><th>失败</th><th>时间</th><th></th></tr></thead>
           <tbody>{runs.map((run: AnyRecord) => <tr key={run.id}><td>{run.id}</td><td>{run.reason}</td><td><Badge value={run.status} /></td><td>{run.updated}</td><td>{run.failed}</td><td>{run.started_at}</td><td><button onClick={() => openRun(run.id)}>详情</button></td></tr>)}</tbody>
@@ -462,7 +506,7 @@ function Runs({ runs, selectedRun, setSelectedRun, api, reload, notify }: any) {
       </Panel>
       {selectedRun && <Panel title={`任务 ${selectedRun.run.id}`}>
         <table><thead><tr><th>镜像</th><th>目标</th><th>状态</th><th>阶段</th><th>错误</th><th></th></tr></thead>
-          <tbody>{selectedRun.items.map((item: AnyRecord) => <tr key={item.id}><td>{item.source}</td><td>{item.target}</td><td><Badge value={item.status} /></td><td>{item.step}</td><td>{item.error}</td><td>{item.status === 'failed' && <button onClick={() => api('POST', `/sync-run-items/${item.id}/retry`).then(() => notify('失败项已重试'))}>重试</button>}</td></tr>)}</tbody>
+          <tbody>{selectedRun.items.map((item: AnyRecord) => <tr key={item.id}><td>{item.source}</td><td>{item.target}</td><td><Badge value={item.status} /></td><td>{item.step}</td><td>{item.error}</td><td>{item.status === 'failed' && <button onClick={() => api('POST', `/sync-run-items/${item.id}/retry`).then(() => { reload(); notify('失败项已入队'); })}>重试</button>}</td></tr>)}</tbody>
         </table>
       </Panel>}
     </div>
@@ -570,7 +614,7 @@ function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify 
       </Panel>
       <Panel title="镜像列表" action={<div className="search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
         <table><thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已触发'))}>同步</button><button onClick={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</button><button className="danger" onClick={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
+          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已入队'))}>同步</button><button onClick={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</button><button className="danger" onClick={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
         </table>
       </Panel>
     </div>
@@ -731,7 +775,7 @@ function Schedules({ schedules, credentials, api, reload, notify }: any) {
   async function run(id: string) {
     await api('POST', `/schedules/${id}/run`, {});
     await reload();
-    notify('计划推送已排队');
+    notify('计划推送已入队');
   }
   return (
     <div className="stack">

@@ -141,6 +141,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - Manual runs, create/update operations, and sync execution results are audited. Failures appear in run history, text logs, events, and webhook notifications.
 - Scheduled push refuses `latest` unless explicitly allowed, and tag protection rules still apply.
 
+## Sync Queue
+
+- Manual sync, single-mirror sync, post-import sync, scheduled push, and retry actions all enter the persistent SQLite `sync_queue`, and the worker consumes tasks by priority.
+- The Sync Tasks page shows the queue and lets you pause, resume, cancel, or replay `queued`, `completed`, `failed`, and `canceled` tasks.
+- The API exposes `GET /api/sync-queue` plus `/api/sync-queue/{id}/pause`, `/resume`, `/cancel`, and `/replay` controls.
+- On startup, the worker recovers unfinished `running` / `cancel_requested` tasks back into retryable queue items, and legacy `.trigger` files are still converted into queue tasks.
+
 ## Image Size Statistics
 
 - The Storage page can queue manifest/blob recalculation in the background. Page requests read SQLite cache and do not perform heavy full scans.

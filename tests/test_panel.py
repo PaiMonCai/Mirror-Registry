@@ -211,8 +211,32 @@ def test_trigger_sync_creates_trigger_file(panel_app):
     response = client.post("/api/sync", headers={"Authorization": "Bearer test-token"})
 
     assert response.status_code == 200
+    data = response.json()
+    assert data["queue"]["reason"] == "manual"
+    assert data["queue"]["status"] == "queued"
     assert trigger_path.exists()
-    assert "manual" in trigger_path.read_text(encoding="utf-8")
+    trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
+    assert trigger["reason"] == "manual"
+    assert trigger["queued"] is True
+    assert client.get("/api/sync-queue").json()[0]["reason"] == "manual"
+
+
+def test_sync_queue_control_flow(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    queue = client.post("/api/sync", headers=headers).json()["queue"]
+    queue_id = queue["id"]
+
+    paused = client.post(f"/api/sync-queue/{queue_id}/pause", headers=headers).json()["queue"]
+    assert paused["status"] == "paused"
+    resumed = client.post(f"/api/sync-queue/{queue_id}/resume", headers=headers).json()["queue"]
+    assert resumed["status"] == "queued"
+    canceled = client.post(f"/api/sync-queue/{queue_id}/cancel", headers=headers).json()["queue"]
+    assert canceled["status"] == "canceled"
+    replayed = client.post(f"/api/sync-queue/{queue_id}/replay", headers=headers).json()["queue"]
+    assert replayed["reason"] == "replay:manual"
+    assert replayed["status"] == "queued"
 
 
 def test_rejects_image_reference_without_tag(panel_app):
@@ -245,6 +269,8 @@ def test_single_mirror_sync_trigger_writes_source(panel_app):
     response = client.post("/api/mirrors/0/sync", headers=headers)
 
     assert response.status_code == 200
+    data = response.json()
+    assert data["queue"]["sources"] == ["docker.io/library/busybox:latest"]
     assert "docker.io/library/busybox:latest" in trigger_path.read_text(encoding="utf-8")
 
 
@@ -367,6 +393,11 @@ spec:
     assert "ghcr.io/example/migrate:v1" in content
     assert "ghcr.io/example/api:v2" in content
     assert "docker.io/library/busybox:1.36" in content
+    assert sorted(data["queue"]["sources"]) == [
+        "docker.io/library/busybox:1.36",
+        "ghcr.io/example/api:v2",
+        "ghcr.io/example/migrate:v1",
+    ]
     trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
     assert trigger["reason"] == "discover-import"
     assert sorted(trigger["sources"]) == [
@@ -561,6 +592,9 @@ def test_retry_failed_run_writes_sources_trigger(panel_app):
     response = client.post(f"/api/sync-runs/{run_id}/retry", headers=headers)
 
     assert response.status_code == 200
+    data = response.json()
+    assert data["queue"]["reason"] == "retry-run"
+    assert data["queue"]["sources"] == ["docker.io/library/busybox:latest"]
     trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
     assert trigger["reason"] == "retry-run"
     assert trigger["sources"] == ["docker.io/library/busybox:latest"]
@@ -898,6 +932,7 @@ def test_schedules_default_disabled_and_trigger_policy_run(panel_app):
 
     run = client.post("/api/schedules/nightly-plan/run", json={}, headers=headers)
     assert run.status_code == 200
+    assert run.json()["queue"]["reason"] == "scheduled-policy:nightly-plan"
     trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
     assert trigger["reason"] == "scheduled-policy:nightly-plan"
     audit = client.get("/api/audit-logs").json()

@@ -120,8 +120,9 @@ h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
   font-size: 12px;
 }
 .badge.ok, .badge.completed, .badge.success, .badge.synced, .badge.configured { color: var(--accent); }
-.badge.error, .badge.failed, .badge.unauthorized, .badge.forbidden { color: var(--danger); }
-.badge.warn, .badge.pending, .badge.warning { color: var(--warn); }
+.badge.error, .badge.failed, .badge.unauthorized, .badge.forbidden, .badge.canceled { color: var(--danger); }
+.badge.warn, .badge.pending, .badge.warning, .badge.queued, .badge.paused, .badge.cancel_requested { color: var(--warn); }
+.badge.running { color: var(--accent-2); }
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 14px; margin: 0; }
 .kv dt { color: var(--muted); }
 .kv dd { margin: 0; }

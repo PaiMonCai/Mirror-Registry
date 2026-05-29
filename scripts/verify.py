@@ -552,6 +552,17 @@ def require_sync_features() -> None:
         "check_scheduled_policies",
         "webhook_dedupe_key",
         "should_send_webhook_event",
+        "db_one",
+        "queue_dedupe_key",
+        "parse_queue_sources",
+        "enqueue_sync_queue_task",
+        "next_sync_queue_task",
+        "mark_sync_queue_task",
+        "attach_sync_queue_run",
+        "recover_stale_queue_tasks",
+        "process_sync_queue_task",
+        "process_sync_queue",
+        "enqueue_periodic_sync",
     ]:
         if name not in function_names:
             fail(f"sync/worker.py missing function {name}")
@@ -601,6 +612,12 @@ def require_sync_features() -> None:
         "scheduled_push_policies",
         "scheduled-policy:",
         "scheduled_push_failed",
+        "sync_queue",
+        "queue_lock",
+        "cancel_requested",
+        "recovered after worker restart",
+        "process_sync_queue",
+        "scheduled policies queued",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -681,6 +698,12 @@ def require_frontend_features() -> None:
         "公网暴露安全边界",
         "验证诊断",
         "同步任务",
+        "/sync-queue",
+        "同步队列",
+        "暂停",
+        "恢复",
+        "取消",
+        "重放",
         "using_default_token",
         "/ops/summary",
         "/ops/diagnostic-bundle",
@@ -728,6 +751,7 @@ def require_tests_and_docs() -> None:
         "Authorization",
         "/api/status",
         "/api/sync",
+        "/api/sync-queue",
         "/api/diagnostics",
         "/api/sync-runs",
         "/api/mirrors/export",
@@ -782,6 +806,10 @@ def require_tests_and_docs() -> None:
         "/api/observability/metrics",
         "test_observability_summary_aggregates_windows_failures_and_alerts",
         "test_notify_webhook_deduplicates_repeated_events",
+        "test_sync_queue_control_flow",
+        "test_check_trigger_converts_legacy_trigger_to_queue",
+        "test_sync_queue_consumes_task_and_recovers_running",
+        "recover_stale_queue_tasks",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -835,6 +863,8 @@ def require_tests_and_docs() -> None:
         "/api/observability/summary",
         "/api/observability/metrics",
         "NOTIFY_DEDUPE_SECONDS",
+        "同步队列",
+        "/api/sync-queue",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -879,6 +909,8 @@ def require_tests_and_docs() -> None:
         "/api/observability/summary",
         "/api/observability/metrics",
         "NOTIFY_DEDUPE_SECONDS",
+        "Sync Queue",
+        "/api/sync-queue",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
