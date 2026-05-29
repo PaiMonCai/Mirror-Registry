@@ -15,6 +15,7 @@ def make_panel_client(
     monkeypatch,
     credentials_secret_key: str | None = "unit-secret-key",
     seed_config: bool = True,
+    login: bool = True,
 ):
     config_path = tmp_path / "config" / "mirrors.yml"
     state_path = tmp_path / "data" / "sync-state.json"
@@ -43,6 +44,9 @@ def make_panel_client(
     monkeypatch.setenv("REGISTRY_STORAGE_PATH", str(registry_storage_path))
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("PANEL_TOKEN", "test-token")
+    monkeypatch.setenv("ADMIN_USERNAME", "admin")
+    monkeypatch.setenv("ADMIN_PASSWORD", "admin-password")
+    monkeypatch.setenv("SESSION_TTL_SECONDS", "604800")
     if credentials_secret_key is None:
         monkeypatch.delenv("CREDENTIALS_SECRET_KEY", raising=False)
     else:
@@ -51,7 +55,89 @@ def make_panel_client(
     import panel.main as panel_main
 
     importlib.reload(panel_main)
-    return TestClient(panel_main.app), config_path, state_path, trigger_path
+    panel_main.ensure_admin_user()
+    client = TestClient(panel_main.app)
+    if login:
+        response = client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+        assert response.status_code == 200
+    return client, config_path, state_path, trigger_path
+
+
+def test_panel_auth_login_logout_and_me(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
+
+    anonymous = client.get("/api/auth/me")
+    assert anonymous.status_code == 401
+
+    failed = client.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})
+    assert failed.status_code == 401
+
+    login_response = client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"})
+    assert login_response.status_code == 200
+    assert login_response.json()["user"]["username"] == "admin"
+    assert client.get("/api/auth/me").json()["authenticated"] is True
+    assert client.get("/api/status").status_code == 200
+
+    logout_response = client.post("/api/auth/logout")
+    assert logout_response.status_code == 200
+    assert client.get("/api/status").status_code == 401
+
+
+def test_unauthenticated_api_requires_login(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
+
+    assert client.get("/api/status").status_code == 401
+    assert client.get("/api/auth/me").status_code == 401
+    response = client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+        },
+    )
+    assert response.status_code == 401
+
+
+def test_bearer_token_remains_automation_compatible(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
+    headers = {"Authorization": "Bearer test-token"}
+
+    assert client.get("/api/status", headers=headers).status_code == 200
+    response = client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+        },
+        headers=headers,
+    )
+    assert response.status_code == 200
+
+
+def test_session_expiry_requires_login_again(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch)
+
+    import panel.main as panel_main
+
+    panel_main.db_execute("UPDATE sessions SET expires_at = ?", ("2000-01-01T00:00:00+00:00",))
+
+    assert client.get("/api/status").status_code == 401
+
+
+def test_login_audit_redacts_secret_values(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
+
+    client.post("/api/auth/login", json={"username": "admin", "password": "wrong-password"})
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"}).status_code == 200
+    assert client.post("/api/auth/logout").status_code == 200
+
+    audit = client.get("/api/audit-logs", headers={"Authorization": "Bearer test-token"}).json()
+    audit_text = json.dumps(audit, ensure_ascii=False)
+    assert "login_failed" in audit_text
+    assert "logout" in audit_text
+    assert "wrong-password" not in audit_text
+    assert "admin-password" not in audit_text
+    assert "mirror_registry_session" not in audit_text
 
 
 def test_status_and_mirror_crud(panel_app):
@@ -104,7 +190,7 @@ def test_startup_bootstraps_default_config(tmp_path, monkeypatch):
     assert "registry_url: http://registry:5000" in content
 
 
-def test_write_routes_require_token(panel_app):
+def test_write_routes_accept_authenticated_session(panel_app):
     client, _, _, _ = panel_app
 
     response = client.post(
@@ -115,7 +201,7 @@ def test_write_routes_require_token(panel_app):
         },
     )
 
-    assert response.status_code == 401
+    assert response.status_code == 200
 
 
 def test_trigger_sync_creates_trigger_file(panel_app):

@@ -4,13 +4,14 @@ import {
   Activity,
   Archive,
   Boxes,
-  CheckCircle2,
   FileKey2,
   Gauge,
   HardDrive,
   History,
   KeyRound,
   ListChecks,
+  LogOut,
+  LockKeyhole,
   Moon,
   Play,
   RefreshCw,
@@ -19,8 +20,9 @@ import {
   ShieldCheck,
   Sun,
   Trash2,
+  UserRound,
 } from 'lucide-react';
-import { createApiClient } from './api';
+import { ApiError, createApiClient } from './api';
 import './styles.css';
 
 type AnyRecord = Record<string, any>;
@@ -66,10 +68,23 @@ function hostFromImage(value: string) {
   return first.includes('.') || first.includes(':') || first === 'localhost' ? first : 'docker.io';
 }
 
+function formatMB(value: any) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes)) return '-';
+  return `${(bytes / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB`;
+}
+
+function diagnosticMessage(item: AnyRecord) {
+  if (item?.details?.free_bytes !== undefined && item?.details?.total_bytes !== undefined) {
+    return `剩余 ${formatMB(item.details.free_bytes)} / 总计 ${formatMB(item.details.total_bytes)}`;
+  }
+  return item.message;
+}
+
 function App() {
   const [view, setView] = useState<View>('dashboard');
   const [theme, setTheme] = useState(localStorage.getItem('mirrorRegistryTheme') || 'light');
-  const [token, setToken] = useState(localStorage.getItem('mirrorRegistryToken') || '');
+  const [auth, setAuth] = useState<AnyRecord>({ loading: true, authenticated: false });
   const [status, setStatus] = useState<AnyRecord>({});
   const [mirrors, setMirrors] = useState<AnyRecord[]>([]);
   const [runs, setRuns] = useState<AnyRecord[]>([]);
@@ -88,7 +103,7 @@ function App() {
   const [schedules, setSchedules] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
-  const api = useMemo(() => createApiClient(() => token), [token]);
+  const api = useMemo(() => createApiClient(() => ''), []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -100,11 +115,27 @@ function App() {
     window.setTimeout(() => setToast(''), 2600);
   }
 
-  function saveToken() {
-    if (token.trim()) localStorage.setItem('mirrorRegistryToken', token.trim());
-    else localStorage.removeItem('mirrorRegistryToken');
-    setToken(token.trim());
-    notify('令牌已保存');
+  async function loadAuth() {
+    try {
+      setAuth({ ...(await api('GET', '/auth/me')), loading: false });
+    } catch (error: any) {
+      if (error instanceof ApiError && error.status === 401) {
+        setAuth({ loading: false, authenticated: false });
+        return;
+      }
+      setAuth({ loading: false, authenticated: false, error: error.message });
+    }
+  }
+
+  async function login(username: string, password: string) {
+    await api('POST', '/auth/login', { username, password });
+    await loadAuth();
+    await loadStatus();
+  }
+
+  async function logout() {
+    await api('POST', '/auth/logout', {});
+    setAuth({ loading: false, authenticated: false });
   }
 
   async function loadStatus() {
@@ -168,10 +199,15 @@ function App() {
   }
 
   useEffect(() => {
-    loadStatus().catch((error) => notify(error.message));
+    loadAuth();
   }, []);
 
   useEffect(() => {
+    if (auth.authenticated) loadStatus().catch((error) => notify(error.message));
+  }, [auth.authenticated]);
+
+  useEffect(() => {
+    if (!auth.authenticated) return;
     const load = async () => {
       if (view === 'dashboard') await loadStatus();
       if (view === 'runs') await loadRuns();
@@ -194,7 +230,7 @@ function App() {
       if (view === 'settings') await loadSettings();
     };
     load().catch((error) => notify(error.message));
-  }, [view]);
+  }, [view, auth.authenticated]);
 
   const filteredMirrors = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -209,6 +245,14 @@ function App() {
     } catch (error: any) {
       notify(error.message);
     }
+  }
+
+  if (auth.loading) {
+    return <div className="auth-page"><div className="login-card"><div className="brand-mark">MR</div><h1>Mirror Registry</h1><p>正在检查登录状态...</p></div></div>;
+  }
+
+  if (!auth.authenticated) {
+    return <LoginScreen auth={auth} login={login} theme={theme} setTheme={setTheme} />;
   }
 
   return (
@@ -229,15 +273,10 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="token-card">
-          <label>写操作令牌</label>
-          <div className="inline">
-            <input value={token} type="password" placeholder="PANEL_TOKEN" onChange={(event) => setToken(event.target.value)} />
-            <button className="icon-button" onClick={saveToken} title="保存令牌">
-              <CheckCircle2 size={16} />
-            </button>
-          </div>
-          {status.using_default_token && <p className="warn">当前服务仍使用默认令牌。</p>}
+        <div className="session-card">
+          <span>当前用户</span>
+          <strong><UserRound size={15} /> {auth.user?.username || 'admin'}</strong>
+          {status.using_default_token && <p className="warn">PANEL_TOKEN 仍为默认值。</p>}
         </div>
       </aside>
 
@@ -248,8 +287,12 @@ function App() {
             <p>{viewMeta[view].subtitle}</p>
           </div>
           <div className="top-actions">
+            <span className="user-pill"><UserRound size={15} />{auth.user?.username || 'admin'}</span>
             <button className="ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">
               {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <button className="ghost" onClick={() => action('已退出登录', logout)} title="退出登录">
+              <LogOut size={16} />
             </button>
             <button className="primary" onClick={() => action('同步已触发', async () => { await api('POST', '/sync'); await loadStatus(); })}>
               <Play size={16} />立即同步
@@ -273,6 +316,58 @@ function App() {
       </main>
 
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+function LoginScreen({ auth, login, theme, setTheme }: { auth: AnyRecord; login: (username: string, password: string) => Promise<void>; theme: string; setTheme: (theme: string) => void }) {
+  const [username, setUsername] = useState('admin');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState(auth.error || '');
+  const [submitting, setSubmitting] = useState(false);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSubmitting(true);
+    setError('');
+    try {
+      await login(username, password);
+    } catch (err: any) {
+      setError(err.message || '登录失败');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="auth-page">
+      <section className="login-card">
+        <div className="login-head">
+          <div className="brand-mark">MR</div>
+          <button className="ghost" type="button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">
+            {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
+        </div>
+        <div>
+          <h1>Mirror Registry</h1>
+          <p>登录后管理镜像同步、仓库凭据、治理策略和存储统计。</p>
+        </div>
+        <form className="login-form" onSubmit={submit}>
+          <label>
+            <span>管理员账号</span>
+            <input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
+          </label>
+          <label>
+            <span>密码</span>
+            <input autoComplete="current-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </label>
+          {error && <p className="form-error">{error}</p>}
+          {auth.admin_initialized === false && <p className="warn">管理员未初始化，请先设置 ADMIN_USERNAME / ADMIN_PASSWORD 并重启 panel。</p>}
+          <button className="primary login-submit" disabled={submitting} type="submit">
+            <LockKeyhole size={16} />{submitting ? '登录中...' : '登录'}
+          </button>
+        </form>
+      </section>
     </div>
   );
 }
@@ -492,11 +587,24 @@ function Storage({ storage, api, reload, notify }: any) {
     await api('POST', '/storage/stats/recalculate', {});
     notify('体积统计重算已排队');
   }
+  const rows = (storage.images || []).flatMap((image: AnyRecord) =>
+    (image.tags || []).map((tag: AnyRecord) => ({
+      image,
+      tag,
+      logical: tag.stats?.logical_size_bytes,
+      deduped: tag.stats?.deduplicated_size_bytes ?? image.deduplicated_size_bytes ?? image.estimated_size_bytes,
+    })),
+  );
   return (
     <div className="stack">
+      <div className="metric-grid storage-summary">
+        <Metric label="估算总占用" value={formatMB(storage.estimated_total_bytes)} />
+        <Metric label="物理 blob" value={formatMB(storage.physical_blob_bytes)} />
+        <Metric label="镜像仓库" value={(storage.images || []).length} />
+      </div>
       <Panel title="本地仓库" action={<button onClick={recalculate}>重算体积</button>}>
-        <table><thead><tr><th>仓库</th><th>Tag</th><th>逻辑体积</th><th>去重体积</th><th>共享层</th><th>删除标记</th></tr></thead>
-          <tbody>{(storage.images || []).flatMap((image: AnyRecord) => (image.tags || []).map((tag: AnyRecord) => <tr key={`${image.repo}:${tag.name}`}><td>{image.repo}</td><td>{tag.name}</td><td>{tag.stats?.logical_size_bytes ?? '-'}</td><td>{tag.stats?.deduplicated_size_bytes ?? image.deduplicated_size_bytes ?? image.estimated_size_bytes ?? '-'}</td><td>{tag.stats?.shared_blob_count ?? '-'}</td><td>{tag.marked_for_deletion ? '已标记' : <button onClick={() => api('POST', '/storage/delete-mark', { repo: image.repo, tag: tag.name, reason: 'manual' }).then(() => { reload(); notify('已标记'); })}>标记</button>}</td></tr>))}</tbody>
+        <table><thead><tr><th>仓库</th><th>Tag</th><th className="num">逻辑体积</th><th className="num">去重体积</th><th className="num">共享层</th><th>删除标记</th></tr></thead>
+          <tbody>{rows.map(({ image, tag, logical, deduped }: AnyRecord) => <tr key={`${image.repo}:${tag.name}`}><td className="breakable mono">{image.repo}</td><td className="breakable mono">{tag.name}</td><td className="num">{formatMB(logical)}</td><td className="num">{formatMB(deduped)}</td><td className="num">{tag.stats?.shared_blob_count ?? '-'}</td><td>{tag.marked_for_deletion ? '已标记' : <button onClick={() => api('POST', '/storage/delete-mark', { repo: image.repo, tag: tag.name, reason: 'manual' }).then(() => { reload(); notify('已标记'); })}>标记</button>}</td></tr>)}</tbody>
         </table>
       </Panel>
       <Panel title="垃圾回收指引"><pre>{(storage.garbage_collection?.commands || []).join('\n')}</pre></Panel>
@@ -505,7 +613,7 @@ function Storage({ storage, api, reload, notify }: any) {
 }
 
 function Diagnostics({ diagnostics, reload }: any) {
-  return <Panel title="诊断结果" action={<button onClick={reload}><RefreshCw size={16} />重新检查</button>}><div className="check-grid">{(diagnostics.checks || []).map((item: AnyRecord) => <div className="check" key={item.name}><Badge value={item.status} /><strong>{item.name}</strong><span>{item.message}</span></div>)}</div></Panel>;
+  return <Panel title="诊断结果" action={<button onClick={reload}><RefreshCw size={16} />重新检查</button>}><div className="check-grid">{(diagnostics.checks || []).map((item: AnyRecord) => <div className="check" key={item.name}><div className="check-status"><Badge value={item.status} /></div><strong>{item.name}</strong><span className="breakable">{diagnosticMessage(item)}</span>{item.suggestion && <small className="breakable">{item.suggestion}</small>}</div>)}</div></Panel>;
 }
 
 function Logs({ logs, events, reload }: any) {

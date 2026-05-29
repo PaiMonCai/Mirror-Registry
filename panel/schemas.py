@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 
 
+class LoginIn(BaseModel):
+    username: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=1, max_length=512)
+
+
 class MirrorIn(BaseModel):
     source: str = Field(min_length=1, max_length=255)
     target: str = Field(min_length=1, max_length=255)

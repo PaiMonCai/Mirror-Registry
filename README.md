@@ -41,10 +41,15 @@ docker compose ps
 
 首次启动时，面板会在配置卷中自动初始化默认 `busybox` 镜像配置。
 
-默认写入接口令牌是 `change-me`。如果要暴露管理面板，先在 `.env` 中设置强随机令牌：
+面板默认使用账号密码登录，并保留 `PANEL_TOKEN` 作为脚本和自动化调用的兼容入口。如果要暴露管理面板，先在 `.env` 中设置强管理员密码和强随机令牌：
 
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-admin-password
+SESSION_TTL_SECONDS=604800
+SESSION_COOKIE_NAME=mirror_registry_session
+SESSION_COOKIE_SECURE=false
 MIRROR_REGISTRY_IMAGE_TAG=latest
 APP_VERSION=v4
 DATABASE_URL=sqlite:////data/mirror-registry.db
@@ -58,13 +63,15 @@ SKOPEO_DEST_TLS_VERIFY=false
 CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
+`SESSION_COOKIE_SECURE=true` 适用于 HTTPS 入口；本机或纯 HTTP 内网测试可保持 `false`。首次启动时，如果数据卷里还没有管理员，面板会用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 初始化单管理员账号。
+
 `MIRROR_REGISTRY_IMAGE_TAG` 默认是 `latest`。如果要锁定正式版本，可以改成指定 tag：
 
 ```dotenv
 MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
-管理面板会把令牌保存在浏览器 local storage 中，并在新增、修改、删除、触发同步等写操作时通过 Bearer token 发送。
+浏览器访问使用 HttpOnly session cookie。`PANEL_TOKEN` 不再作为主要前端入口，只用于脚本、CI 或外部自动化通过 Bearer token 调用受保护 API。
 
 ## 前端工程化与仓库凭据
 
@@ -74,6 +81,7 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 凭据支持 host 默认和单条镜像覆盖，匹配优先级为 mirror 覆盖 > host 默认 > 无凭据。
 - 生产环境保存凭据前必须设置 `CREDENTIALS_SECRET_KEY`；secret 不回显、不明文导出、不写入日志和审计详情。
 - sync 会在执行 `skopeo inspect/copy` 前生成临时 authfile，并在命令结束后清理。
+- 面板登录使用单管理员账号和 session cookie；登录成功、失败和退出会写入审计，但不会记录密码或 session token。
 
 ## 仓库治理与备份恢复
 
@@ -107,7 +115,7 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 重试策略：`sync_retry_count` 控制最大重试次数，失败复制使用指数退避；面板可重试失败任务或失败明细。
 - 存储管理：面板展示本地 Registry 仓库、tag、估算占用、删除标记和垃圾回收指引。
 - 通知能力：配置 `NOTIFY_WEBHOOK_URL` 或面板 webhook 后，会发送同步失败、失败恢复和磁盘空间不足事件。
-- 认证增强：`PANEL_TOKEN` 只保护写接口；公网暴露前建议放在反向代理后，并启用 Basic Auth 或其他登录态。
+- 认证增强：后台 API 默认要求账号密码登录；`PANEL_TOKEN` 仅保留为自动化兼容入口，公网暴露前仍建议放在反向代理后，并可叠加 Basic Auth 或可信 IP 限制。
 - 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
 
 ## v4 平台化扩展能力
@@ -125,7 +133,7 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 运行数据默认写入 SQLite：`data/mirror-registry.db`。
 - 面板提供「同步任务」页，展示每轮同步任务和每个镜像的结果。
 - 面板提供「验证诊断」页，检查 Registry、配置目录、数据目录、SQLite、当前镜像 tag、版本信息和 sync 心跳。
-- UI 默认浅色主题，深色主题和写操作令牌都保存在浏览器 local storage。
+- UI 默认浅色主题，深色主题保存在浏览器 local storage；登录态通过 HttpOnly cookie 保存。
 
 ## 本地开发
 

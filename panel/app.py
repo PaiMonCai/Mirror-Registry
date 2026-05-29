@@ -2,12 +2,14 @@ import asyncio
 import base64
 import fnmatch
 import hashlib
+import hmac
 import json
 import os
 import re
 import shutil
 import sqlite3
 import tempfile
+import secrets
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,7 +19,8 @@ from urllib.parse import urlparse
 import httpx
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from mirror_registry_core.config import default_config
@@ -25,6 +28,7 @@ from .schemas import (
     BackupRestoreVerifyIn,
     CredentialIn,
     CredentialTestIn,
+    LoginIn,
     MirrorGroupIn,
     MirrorImportIn,
     MirrorIn,
@@ -43,9 +47,18 @@ except ImportError:  # pragma: no cover - exercised only when external DB deps a
     text = None
 
 
+def env_int(name: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    return max(minimum, min(value, maximum))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     load_config()
+    ensure_admin_user()
     yield
 
 
@@ -59,6 +72,11 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:////data/mirror-registry.db")
 REGISTRY_URL = os.getenv("REGISTRY_URL", "http://registry:5000").rstrip("/")
 REGISTRY_STORAGE_PATH = Path(os.getenv("REGISTRY_STORAGE_PATH", "/data/registry"))
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
+SESSION_TTL_SECONDS = env_int("SESSION_TTL_SECONDS", 604800, 300, 60 * 60 * 24 * 30)
+SESSION_COOKIE_NAME = os.getenv("SESSION_COOKIE_NAME", "mirror_registry_session")
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {"1", "true", "yes"}
 APP_VERSION = os.getenv("APP_VERSION", "v4")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 CREDENTIALS_SECRET_KEY = os.getenv("CREDENTIALS_SECRET_KEY", "")
@@ -242,6 +260,22 @@ CREATE TABLE IF NOT EXISTS storage_stats (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(repo, tag)
 );
+
+CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    username TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -402,6 +436,24 @@ POSTGRES_SCHEMA_STATEMENTS = [
         PRIMARY KEY(repo, tag)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        username VARCHAR(120) PRIMARY KEY,
+        password_hash TEXT NOT NULL,
+        role VARCHAR(32) NOT NULL DEFAULT 'admin',
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(128) PRIMARY KEY,
+        username VARCHAR(120) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        expires_at VARCHAR(64) NOT NULL,
+        last_seen_at VARCHAR(64) NOT NULL
+    )
+    """,
 ]
 
 MYSQL_SCHEMA_STATEMENTS = [
@@ -560,10 +612,123 @@ def runtime_state() -> dict:
     return {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
 
 
-def require_write_token(authorization: Annotated[str | None, Header()] = None) -> None:
+def password_hash(password: str) -> str:
+    salt = secrets.token_hex(16)
+    iterations = 200_000
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), iterations).hex()
+    return f"pbkdf2_sha256${iterations}${salt}${digest}"
+
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        algorithm, iterations, salt, expected = stored_hash.split("$", 3)
+        if algorithm != "pbkdf2_sha256":
+            return False
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), bytes.fromhex(salt), int(iterations)).hex()
+        return hmac.compare_digest(digest, expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def admin_user_exists() -> bool:
+    return bool(db_rows("SELECT username FROM users LIMIT 1"))
+
+
+def ensure_admin_user() -> bool:
+    if admin_user_exists():
+        return True
+    if not ADMIN_PASSWORD.strip():
+        return False
+    now = now_iso()
+    db_execute(
+        """
+        INSERT INTO users(username, password_hash, role, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (ADMIN_USERNAME, password_hash(ADMIN_PASSWORD), "admin", now, now),
+    )
+    audit_log("bootstrap_admin", "user", ADMIN_USERNAME, {"source": "environment"}, actor="system")
+    return True
+
+
+def user_row(username: str) -> dict | None:
+    clean_username = username.strip()
+    if not clean_username:
+        return None
+    return db_one("SELECT username, password_hash, role, created_at, updated_at FROM users WHERE username = ?", (clean_username,))
+
+
+def bearer_token_valid(authorization: str | None) -> bool:
     expected = f"Bearer {PANEL_TOKEN}"
-    if not PANEL_TOKEN or authorization != expected:
-        raise HTTPException(401, "写操作需要有效访问令牌")
+    return bool(PANEL_TOKEN and authorization and hmac.compare_digest(authorization, expected))
+
+
+def session_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def create_session(username: str) -> tuple[str, str]:
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    expires_at = (now + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat()
+    db_execute("DELETE FROM sessions WHERE expires_at <= ?", (now.isoformat(),))
+    db_execute(
+        """
+        INSERT INTO sessions(id, username, created_at, expires_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (session_hash(token), username, now.isoformat(), expires_at, now.isoformat()),
+    )
+    return token, expires_at
+
+
+def session_user(token: str | None) -> dict | None:
+    if not token:
+        return None
+    row = db_one(
+        """
+        SELECT id, username, created_at, expires_at, last_seen_at
+        FROM sessions
+        WHERE id = ? AND expires_at > ?
+        """,
+        (session_hash(token), now_iso()),
+    )
+    if not row:
+        return None
+    db_execute("UPDATE sessions SET last_seen_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    return {"username": row["username"], "role": "admin", "auth_method": "session", "expires_at": row["expires_at"]}
+
+
+def delete_session(token: str | None) -> None:
+    if token:
+        db_execute("DELETE FROM sessions WHERE id = ?", (session_hash(token),))
+
+
+def authenticate_request(request: Request) -> dict | None:
+    authorization = request.headers.get("authorization")
+    if bearer_token_valid(authorization):
+        return {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
+    return session_user(request.cookies.get(SESSION_COOKIE_NAME))
+
+
+@app.middleware("http")
+async def require_api_auth(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/auth/login":
+        user = authenticate_request(request)
+        if not user:
+            return JSONResponse({"detail": "需要登录"}, status_code=401)
+        request.state.auth_user = user
+    return await call_next(request)
+
+
+def require_write_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
+    if getattr(request.state, "auth_user", None):
+        return
+    if bearer_token_valid(authorization):
+        request.state.auth_user = {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
+        return
+    raise HTTPException(401, "写操作需要登录或有效访问令牌")
 
 
 def ensure_parent(path: Path) -> None:
@@ -1266,6 +1431,50 @@ def deployment_modes() -> list[dict]:
     ]
 
 
+@app.post("/api/auth/login")
+def login(body: LoginIn, response: Response):
+    initialized = ensure_admin_user()
+    if not initialized:
+        raise HTTPException(503, "管理员账号未初始化，请设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 后重启 panel")
+    row = user_row(body.username)
+    if not row or not verify_password(body.password, row["password_hash"]):
+        audit_log("login_failed", "auth", body.username.strip() or "unknown", {"reason": "invalid_credentials"}, actor=body.username.strip() or "anonymous")
+        raise HTTPException(401, "用户名或密码错误")
+    token, expires_at = create_session(row["username"])
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        token,
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=SESSION_COOKIE_SECURE,
+        samesite="lax",
+        path="/",
+    )
+    audit_log("login", "auth", row["username"], {"method": "password", "expires_at": expires_at}, actor=row["username"])
+    return {"ok": True, "user": {"username": row["username"], "role": row["role"]}, "expires_at": expires_at}
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request):
+    user = authenticate_request(request)
+    return {
+        "authenticated": bool(user),
+        "user": user,
+        "admin_initialized": admin_user_exists(),
+        "auth_required": True,
+        "using_default_token": PANEL_TOKEN == "change-me",
+    }
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response):
+    user = getattr(request.state, "auth_user", None) or {"username": "unknown", "auth_method": "unknown"}
+    delete_session(request.cookies.get(SESSION_COOKIE_NAME))
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="lax")
+    audit_log("logout", "auth", user.get("username", "unknown"), {"method": user.get("auth_method", "unknown")}, actor=user.get("username", "unknown"))
+    return {"ok": True}
+
+
 @app.get("/api/status")
 def get_status():
     config = load_config()
@@ -1285,7 +1494,9 @@ def get_status():
         "sync_concurrency": settings["sync_concurrency"],
         "sync_retry_count": settings["sync_retry_count"],
         "is_syncing": running or TRIGGER_PATH.exists(),
-        "auth_required": bool(PANEL_TOKEN),
+        "auth_required": True,
+        "auth_mode": "session",
+        "admin_initialized": admin_user_exists(),
         "using_default_token": PANEL_TOKEN == "change-me",
         "last_started_at": runtime.get("last_started_at", {}).get("value"),
         "last_finished_at": runtime.get("last_finished_at", {}).get("value"),
@@ -1762,6 +1973,17 @@ async def run_diagnostics() -> dict:
             "ok" if CREDENTIALS_SECRET_KEY.strip() else "warn",
             "CREDENTIALS_SECRET_KEY 已配置" if CREDENTIALS_SECRET_KEY.strip() else "未配置 CREDENTIALS_SECRET_KEY，不能保存加密仓库凭据",
             "生产环境保存仓库凭据前必须设置 CREDENTIALS_SECRET_KEY",
+        )
+    )
+    admin_ready = admin_user_exists()
+    admin_env_ready = bool(ADMIN_USERNAME.strip() and ADMIN_PASSWORD.strip())
+    checks.append(
+        diagnostic_item(
+            "面板登录",
+            "ok" if admin_ready else "error",
+            "管理员账号已初始化" if admin_ready else "管理员账号未初始化",
+            "生产环境必须设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 后重启 panel",
+            {"admin_username_configured": bool(ADMIN_USERNAME.strip()), "admin_password_configured": bool(ADMIN_PASSWORD.strip()), "admin_env_ready": admin_env_ready},
         )
     )
 
@@ -2479,11 +2701,21 @@ def unmark_image_for_delete(mark_id: int):
 @app.get("/api/security-guide")
 def get_security_guide():
     return {
-        "public_exposure_boundary": "不要把 8080 面板端口直接暴露到公网。PANEL_TOKEN 只保护写操作，不等于完整登录系统。",
+        "public_exposure_boundary": "不要把 8080 面板端口直接暴露到公网。面板登录保护后台 API，PANEL_TOKEN 仅作为脚本和自动化兼容入口。",
+        "panel_auth": {
+            "mode": "single_admin_session",
+            "admin_initialized": admin_user_exists(),
+            "admin_username_configured": bool(ADMIN_USERNAME.strip()),
+            "admin_password_configured": bool(ADMIN_PASSWORD.strip()),
+            "session_cookie": SESSION_COOKIE_NAME,
+            "session_ttl_seconds": SESSION_TTL_SECONDS,
+            "automation_token_supported": bool(PANEL_TOKEN),
+        },
         "recommended": [
             "通过 Nginx、Caddy 或 Traefik 放在内网入口后面。",
-            "在反向代理层启用 Basic Auth 或单点登录，只允许可信 IP 访问。",
-            "仍然保留强随机 PANEL_TOKEN，作为写接口的第二层保护。",
+            "生产环境必须设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 初始化管理员。",
+            "仍然保留强随机 PANEL_TOKEN，供脚本、CI 或外部自动化调用受保护接口。",
+            "反向代理层 Basic Auth、SSO 或可信 IP 限制可作为额外保护层。",
         ],
         "nginx_basic_auth": [
             "location / {",

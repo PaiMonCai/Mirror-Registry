@@ -139,6 +139,11 @@ def require_compose_shape() -> None:
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
+        "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
+        "ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}",
+        "SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}",
+        "SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}",
+        "SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}",
         "COMMAND_TIMEOUT_SECONDS: 900",
         "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
     ]
@@ -178,6 +183,11 @@ def require_compose_shape() -> None:
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
+        "ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}",
+        "ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}",
+        "SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}",
+        "SESSION_COOKIE_NAME: ${SESSION_COOKIE_NAME:-mirror_registry_session}",
+        "SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}",
         "COMMAND_TIMEOUT_SECONDS: 900",
         "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
     ]
@@ -345,6 +355,23 @@ def require_panel_features() -> None:
 
     required_snippets = [
         "PANEL_TOKEN",
+        "LoginIn",
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "SESSION_COOKIE_NAME",
+        "SESSION_TTL_SECONDS",
+        "pbkdf2_sha256",
+        "hashlib.pbkdf2_hmac",
+        "users",
+        "sessions",
+        "ensure_admin_user",
+        "authenticate_request",
+        "@app.middleware(\"http\")",
+        "@app.post(\"/api/auth/login\")",
+        "@app.get(\"/api/auth/me\")",
+        "@app.post(\"/api/auth/logout\")",
+        "httponly=True",
+        "samesite=\"lax\"",
         "from mirror_registry_core.config import default_config",
         "Depends(require_write_token)",
         "DATABASE_URL",
@@ -513,7 +540,16 @@ def require_frontend_features() -> None:
         "createRoot",
         "createApiClient",
         "mirrorRegistryTheme",
-        "mirrorRegistryToken",
+        "loadAuth",
+        "/auth/me",
+        "/auth/login",
+        "/auth/logout",
+        "LoginScreen",
+        "session-card",
+        "user-pill",
+        "formatMB",
+        "breakable",
+        "num",
         "loadDiagnostics",
         "loadRuns",
         "loadStorage",
@@ -555,6 +591,7 @@ def require_frontend_features() -> None:
         "Authorization",
         "Bearer",
         "Content-Type",
+        "credentials: 'same-origin'",
         "ApiError",
     ]:
         if snippet not in api_source:
@@ -571,7 +608,7 @@ def require_frontend_features() -> None:
             fail(f"panel/package.json missing {snippet!r}")
     if '<div id="root"></div>' not in static_index:
         fail("Vite build output is not present in panel/static/index.html")
-    ok("React/Vite frontend sends write token through centralized API client")
+    ok("React/Vite frontend uses session login and keeps Bearer automation support in the API client")
 
 
 def require_tests_and_docs() -> None:
@@ -604,6 +641,12 @@ def require_tests_and_docs() -> None:
         "scheduled-policy:",
         "compute_manifest_stats",
         "/api/storage",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/auth/me",
+        "test_unauthenticated_api_requires_login",
+        "test_bearer_token_remains_automation_compatible",
+        "test_session_expiry_requires_login_again",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -634,6 +677,12 @@ def require_tests_and_docs() -> None:
         "计划推送",
         "镜像体积统计",
         "PANEL_TOKEN",
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "SESSION_TTL_SECONDS",
+        "SESSION_COOKIE_SECURE",
+        "账号密码登录",
+        "HttpOnly session cookie",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
         "python -m pytest",
@@ -665,12 +714,23 @@ def require_tests_and_docs() -> None:
         "CREDENTIALS_SECRET_KEY",
         "Scheduled Push",
         "Image Size Statistics",
+        "ADMIN_USERNAME",
+        "ADMIN_PASSWORD",
+        "SESSION_TTL_SECONDS",
+        "SESSION_COOKIE_SECURE",
+        "account/password login",
+        "HttpOnly session cookie",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
     env_example = read(".env.example")
     for snippet in [
         "PANEL_TOKEN=",
+        "ADMIN_USERNAME=",
+        "ADMIN_PASSWORD=",
+        "SESSION_TTL_SECONDS=604800",
+        "SESSION_COOKIE_NAME=mirror_registry_session",
+        "SESSION_COOKIE_SECURE=false",
         "MIRROR_REGISTRY_IMAGE_TAG=latest",
         "APP_VERSION=v4",
         "DATABASE_URL=sqlite:////data/mirror-registry.db",

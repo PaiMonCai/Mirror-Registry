@@ -41,10 +41,15 @@ Production Compose no longer depends on project-side `config/` or `data/` folder
 
 On first startup, the panel initializes default `busybox` mirror configuration in the config volume.
 
-The default write API token is `change-me`. Set a real token in `.env` before exposing the panel:
+The panel now uses account/password login by default, while `PANEL_TOKEN` remains available for scripts and automation. Set a strong admin password and a real token in `.env` before exposing the panel:
 
 ```dotenv
 PANEL_TOKEN=replace-with-a-long-random-token
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace-with-a-strong-admin-password
+SESSION_TTL_SECONDS=604800
+SESSION_COOKIE_NAME=mirror_registry_session
+SESSION_COOKIE_SECURE=false
 MIRROR_REGISTRY_IMAGE_TAG=latest
 APP_VERSION=v4
 DATABASE_URL=sqlite:////data/mirror-registry.db
@@ -58,13 +63,15 @@ SKOPEO_DEST_TLS_VERIFY=false
 CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
+Use `SESSION_COOKIE_SECURE=true` behind HTTPS. Local or plain HTTP intranet tests can keep it `false`. On first startup, if no admin exists in the data volume, the panel initializes one from `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+
 `MIRROR_REGISTRY_IMAGE_TAG` defaults to `latest`. To pin a release, set it to a specific tag:
 
 ```dotenv
 MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
-The panel stores the token in browser local storage and sends it as a Bearer token for write operations.
+Browser access uses an HttpOnly session cookie. `PANEL_TOKEN` is no longer the primary frontend entry; it is kept for scripts, CI, or external automation using a Bearer token against protected APIs.
 
 ## Frontend Engineering and Registry Credentials
 
@@ -74,6 +81,7 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Credentials support host defaults and per-mirror overrides. Matching priority is mirror override > host default > no credential.
 - Production deployments must set `CREDENTIALS_SECRET_KEY` before saving credentials. Secrets are not echoed, exported in plaintext, logged, or written into audit detail.
 - The sync worker creates a temporary authfile for `skopeo inspect/copy` and removes it after the command finishes.
+- Panel login uses a single admin account and a session cookie. Login success, login failure, and logout are audited without recording passwords or session tokens.
 
 ## Repository Governance and Backup Restore
 
@@ -107,7 +115,7 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Retry policy: `sync_retry_count` controls max retries; copy failures use exponential backoff, and the panel can retry failed runs or failed items.
 - Storage management: the panel shows local Registry repositories, tags, estimated usage, deletion marks, and garbage collection guidance.
 - Notifications: configure `NOTIFY_WEBHOOK_URL` or the panel webhook setting to send sync failure, recovery, and low disk space events.
-- Authentication boundary: `PANEL_TOKEN` protects write APIs only. Put the panel behind a reverse proxy with Basic Auth or another login layer before exposing it publicly.
+- Authentication boundary: backend APIs require account/password login by default. `PANEL_TOKEN` is retained only for automation compatibility, and the panel should still sit behind a reverse proxy with optional Basic Auth or trusted IP limits before public exposure.
 - Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
 
 ## v4 Platform Extensions
@@ -125,7 +133,7 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Runtime data is stored in SQLite by default: `data/mirror-registry.db`.
 - The panel has a sync runs view for each run and per-image result.
 - The panel has a diagnostics view for Registry, config, data, SQLite, current image tag, app version, and sync heartbeat checks.
-- The UI defaults to a light operations theme. Dark theme and write token preferences are stored in browser local storage.
+- The UI defaults to a light operations theme. Dark theme is stored in browser local storage; login state is stored in an HttpOnly cookie.
 
 ## Local Development
 

@@ -22,11 +22,19 @@ export function createApiClient(getToken: () => string): ApiClient {
     const response = await fetch(`/api${path}`, {
       method,
       headers,
+      credentials: 'same-origin',
       body: body === undefined ? undefined : JSON.stringify(body),
     });
     if (!response.ok) {
       const text = await response.text();
-      throw new ApiError(response.status, text || `${response.status} ${response.statusText}`);
+      let message = text || `${response.status} ${response.statusText}`;
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed.detail || parsed.message || message;
+      } catch {
+        // Keep the original response text.
+      }
+      throw new ApiError(response.status, message);
     }
     return response.json() as Promise<T>;
   };
