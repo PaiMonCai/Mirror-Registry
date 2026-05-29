@@ -16,12 +16,14 @@ def make_panel_client(tmp_path, monkeypatch, credentials_secret_key: str | None 
     log_path = tmp_path / "data" / "sync.log"
     trigger_path = tmp_path / "data" / ".trigger"
     db_path = tmp_path / "data" / "mirror-registry.db"
+    registry_storage_path = tmp_path / "data" / "registry"
     static_dir = tmp_path / "static"
 
     static_dir.mkdir(parents=True)
+    registry_storage_path.mkdir(parents=True)
     (static_dir / "index.html").write_text("<!doctype html><title>test</title>", encoding="utf-8")
-    config_path.parent.mkdir(parents=True)
-    state_path.parent.mkdir(parents=True)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         "mirrors: []\nsettings:\n  check_interval_minutes: 30\n",
         encoding="utf-8",
@@ -32,6 +34,7 @@ def make_panel_client(tmp_path, monkeypatch, credentials_secret_key: str | None 
     monkeypatch.setenv("LOG_PATH", str(log_path))
     monkeypatch.setenv("TRIGGER_PATH", str(trigger_path))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    monkeypatch.setenv("REGISTRY_STORAGE_PATH", str(registry_storage_path))
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("PANEL_TOKEN", "test-token")
     if credentials_secret_key is None:
@@ -323,6 +326,8 @@ def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
 
     import panel.main as panel_main
 
+    status_holder = {"code": 200}
+
     class FakeAsyncClient:
         def __init__(self, timeout):
             self.timeout = timeout
@@ -336,12 +341,16 @@ def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
         async def get(self, url, auth):
             assert url == "https://index.docker.io/v2/"
             assert auth == ("alice", "top-secret")
-            return type("Response", (), {"status_code": 200})()
+            return type("Response", (), {"status_code": status_holder["code"]})()
 
     monkeypatch.setattr(panel_main.httpx, "AsyncClient", FakeAsyncClient)
     test_response = client.post("/api/credentials/dockerhub/test", json={}, headers=headers)
     assert test_response.status_code == 200
     assert test_response.json()["status"] == "ok"
+    status_holder["code"] = 401
+    assert client.post("/api/credentials/dockerhub/test", json={}, headers=headers).json()["status"] == "authentication_failed"
+    status_holder["code"] = 403
+    assert client.post("/api/credentials/dockerhub/test", json={}, headers=headers).json()["status"] == "permission_denied"
 
     update = client.put(
         "/api/credentials/dockerhub",
@@ -390,3 +399,92 @@ def test_credentials_require_secret_key(tmp_path, monkeypatch):
     assert response.status_code == 400
     diagnostics = client.post("/api/diagnostics/run").json()
     assert any(item["name"] == "仓库凭据密钥" and item["status"] == "warn" for item in diagnostics["checks"])
+
+
+def test_governance_blocks_protected_delete_and_retention_marks(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    rule_response = client.post(
+        "/api/tag-protection",
+        json={"id": "release-tags", "name": "Release tags", "repo_pattern": "library/*", "tag_pattern": "v*", "environment": "*"},
+        headers=headers,
+    )
+    assert rule_response.status_code == 200
+    check_response = client.get("/api/tag-protection/check", params={"repo": "library/busybox", "tag": "v1.0.0"}).json()
+    assert check_response["protected"] is True
+
+    protected = client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/busybox:v1.0.0",
+            "target": "localhost:5000/library/busybox:v1.0.0",
+            "environment": "prod",
+        },
+        headers=headers,
+    )
+    assert protected.status_code == 200
+    blocked = client.post(
+        "/api/storage/delete-mark",
+        json={"repo": "library/busybox", "tag": "v1.0.0", "reason": "cleanup"},
+        headers=headers,
+    )
+    assert blocked.status_code == 409
+
+    import panel.main as panel_main
+
+    run_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, ended_at, total) VALUES (?, ?, ?, ?, ?, ?)",
+        ("manual", "completed", None, "2024-01-04T00:00:00+00:00", "2024-01-04T00:00:00+00:00", 3),
+    )
+    for tag, ended_at in [
+        ("3", "2024-01-04T00:00:00+00:00"),
+        ("2", "2024-01-03T00:00:00+00:00"),
+        ("v1.0.0", "2024-01-02T00:00:00+00:00"),
+    ]:
+        panel_main.db_execute(
+            """
+            INSERT INTO sync_run_items(run_id, source, target, status, new_digest, started_at, ended_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                f"docker.io/library/busybox:{tag}",
+                f"localhost:5000/library/busybox:{tag}",
+                "success",
+                f"sha256:{tag}",
+                ended_at,
+                ended_at,
+            ),
+        )
+
+    policy_response = client.post(
+        "/api/retention-policies",
+        json={"id": "keep-one", "name": "Keep one", "repo_pattern": "library/busybox", "keep_last": 1},
+        headers=headers,
+    )
+    assert policy_response.status_code == 200
+    dry_run = client.post("/api/retention-policies/keep-one/dry-run", json={}, headers=headers).json()
+    assert [item["tag"] for item in dry_run["candidates"]] == ["2"]
+    assert [item["tag"] for item in dry_run["skipped_protected"]] == ["v1.0.0"]
+
+    applied = client.post("/api/retention-policies/keep-one/apply", json={}, headers=headers).json()
+    assert applied["marked"] == ["library/busybox:2"]
+    storage = client.get("/api/storage").json()
+    assert storage["deletion_marks"][0]["tag"] == "2"
+
+
+def test_backup_restore_guide_and_verify(panel_app):
+    client, _, _, _ = panel_app
+    guide = client.get("/api/backup-restore-guide").json()
+    assert "CREDENTIALS_SECRET_KEY" in guide["required_items"]
+    assert any("/v2/" in item for item in guide["tls_entry"].values())
+
+    response = client.post(
+        "/api/backup-restore/verify",
+        json={"require_credentials_secret": True},
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True

@@ -290,6 +290,14 @@ def require_panel_features() -> None:
         "test_credential",
         "encrypt_secret",
         "decrypt_secret",
+        "list_tag_protection_rules",
+        "upsert_tag_protection_rule",
+        "dry_run_retention_policy",
+        "apply_retention_policy",
+        "get_backup_restore_guide",
+        "verify_backup_restore_readiness",
+        "search_storage",
+        "get_storage_image_detail",
     ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
@@ -337,6 +345,12 @@ def require_panel_features() -> None:
         "credentials",
         "@app.get(\"/api/credentials\")",
         "@app.post(\"/api/credentials\"",
+        "@app.get(\"/api/tag-protection\")",
+        "@app.post(\"/api/retention-policies/{policy_id}/dry-run\"",
+        "@app.get(\"/api/backup-restore-guide\")",
+        "protected_environment",
+        "release_tag",
+        "CREDENTIALS_SECRET_KEY",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -376,6 +390,9 @@ def require_sync_features() -> None:
         "write_temp_authfile",
         "remove_temp_authfile",
         "build_skopeo_inspect_command",
+        "load_tag_protection_rules",
+        "tag_protection_reasons",
+        "image_repo_tag",
     ]:
         if name not in function_names:
             fail(f"sync/sync.py missing function {name}")
@@ -416,6 +433,9 @@ def require_sync_features() -> None:
         "credentials",
         "--authfile",
         "redact_command",
+        "tag_protection_rules",
+        "copy_blocked",
+        "tag_written",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -449,6 +469,10 @@ def require_frontend_features() -> None:
         "source_credential_id",
         "target_credential_id",
         "/credentials",
+        "/tag-protection",
+        "/retention-policies",
+        "/backup-restore-guide",
+        "仓库治理",
         "sync_concurrency",
         "Webhook URL",
         "平台配置",
@@ -510,6 +534,10 @@ def require_tests_and_docs() -> None:
         "/api/credentials",
         "write_temp_authfile",
         "CREDENTIALS_SECRET_KEY",
+        "/api/tag-protection",
+        "/api/retention-policies",
+        "/api/backup-restore-guide",
+        "tag_written",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -535,6 +563,8 @@ def require_tests_and_docs() -> None:
         "删除标记",
         "Basic Auth",
         "导入导出",
+        "仓库治理",
+        "CREDENTIALS_SECRET_KEY",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -563,6 +593,8 @@ def require_tests_and_docs() -> None:
         "NOTIFY_WEBHOOK_URL",
         "Basic Auth",
         "Import/export",
+        "Repository Governance",
+        "CREDENTIALS_SECRET_KEY",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")

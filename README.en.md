@@ -59,6 +59,15 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Production deployments must set `CREDENTIALS_SECRET_KEY` before saving credentials. Secrets are not echoed, exported in plaintext, logged, or written into audit detail.
 - The sync worker creates a temporary authfile for `skopeo inspect/copy` and removes it after the command finishes.
 
+## Repository Governance and Backup Restore
+
+- The Governance page supports tag protection rules. Production environments, release tags, and explicit rules block delete marks, retention policies, and automatic overwrites.
+- Retention policies run dry-run first and list candidate repo/tags, matching reasons, and protected skips. Applying a policy creates deletion marks only; it does not delete manifests.
+- Storage management has search and detail APIs that connect tag source, digest, sync task, deletion mark, and protection state.
+- Credential tests distinguish authentication failures, network failures, unreachable registries, and missing permissions while keeping token/password values redacted.
+- The backup checklist covers `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, and `CREDENTIALS_SECRET_KEY`; restore should run read-only validation before starting sync.
+- The security guide separates the panel HTTPS entry from the Registry `/v2/` HTTPS entry, and sync does not need an exposed inbound port.
+
 ## v3 Management
 
 - Concurrent sync: `sync_concurrency` defaults to `2`; the sync worker locks each target image so the same tag is not written concurrently.

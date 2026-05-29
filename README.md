@@ -59,6 +59,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 生产环境保存凭据前必须设置 `CREDENTIALS_SECRET_KEY`；secret 不回显、不明文导出、不写入日志和审计详情。
 - sync 会在执行 `skopeo inspect/copy` 前生成临时 authfile，并在命令结束后清理。
 
+## 仓库治理与备份恢复
+
+- 面板「仓库治理」页支持 tag 保护规则，生产环境、正式 release tag 和显式规则命中的 tag 会阻止删除标记、保留策略和自动覆盖。
+- 保留策略先执行 dry-run，列出候选 repo/tag、匹配原因和被保护跳过的 tag；应用策略只生成删除标记，不直接删除 manifest。
+- 「存储管理」保留搜索和镜像详情 API，可关联 tag 来源、digest、同步任务、删除标记和保护状态。
+- 凭据测试会区分认证失败、网络失败、Registry 不可达和权限不足，并保持 token/password 脱敏。
+- 备份恢复清单覆盖 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env` 和 `CREDENTIALS_SECRET_KEY`，恢复时先做只读验证再启动 sync。
+- 安全指南区分管理面板 HTTPS 入口和 Registry `/v2/` HTTPS 入口，sync 不需要暴露入站端口。
+
 ## v3 管理增强能力
 
 - 并发同步：`sync_concurrency` 默认 `2`，同一目标镜像写入时会加锁，避免并发写入同一个 tag。

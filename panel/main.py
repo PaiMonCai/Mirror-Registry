@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -7,7 +8,7 @@ import re
 import shutil
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlparse
@@ -115,6 +116,30 @@ class StorageDeleteMarkIn(BaseModel):
     reason: str | None = Field(default="", max_length=500)
 
 
+class TagProtectionRuleIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    repo_pattern: str = Field(default="*", min_length=1, max_length=255)
+    tag_pattern: str = Field(default="*", min_length=1, max_length=128)
+    environment: str = Field(default="*", min_length=1, max_length=64)
+    enabled: bool = True
+    reason: str | None = Field(default="", max_length=500)
+
+
+class RetentionPolicyIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    repo_pattern: str = Field(default="*", min_length=1, max_length=255)
+    environment: str = Field(default="*", min_length=1, max_length=64)
+    keep_last: int = Field(default=5, ge=1, le=200)
+    max_age_days: int | None = Field(default=None, ge=1, le=3650)
+    enabled: bool = False
+
+
+class BackupRestoreVerifyIn(BaseModel):
+    require_credentials_secret: bool = True
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -220,6 +245,30 @@ CREATE TABLE IF NOT EXISTS credentials (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tag_protection_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    repo_pattern TEXT NOT NULL,
+    tag_pattern TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS retention_policies (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    repo_pattern TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    keep_last INTEGER NOT NULL,
+    max_age_days INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -318,6 +367,32 @@ POSTGRES_SCHEMA_STATEMENTS = [
         username VARCHAR(255) NOT NULL,
         encrypted_secret TEXT NOT NULL,
         scope VARCHAR(16) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tag_protection_rules (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        repo_pattern VARCHAR(255) NOT NULL,
+        tag_pattern VARCHAR(128) NOT NULL,
+        environment VARCHAR(64) NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        reason TEXT,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS retention_policies (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        repo_pattern VARCHAR(255) NOT NULL,
+        environment VARCHAR(64) NOT NULL,
+        keep_last INTEGER NOT NULL,
+        max_age_days INTEGER,
+        enabled INTEGER NOT NULL DEFAULT 0,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
     )
@@ -636,6 +711,212 @@ def public_credential(row: dict) -> dict:
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def image_repo_tag(image: str) -> tuple[str, str]:
+    value = image.strip()
+    if ":" not in value:
+        raise HTTPException(400, "镜像地址必须包含 tag")
+    first, rest = (value.split("/", 1) + [""])[:2]
+    without_registry = rest if rest and ("." in first or ":" in first or first == "localhost") else value
+    repo, tag = without_registry.rsplit(":", 1)
+    return validate_repo_tag(repo, tag)
+
+
+def pattern_matches(pattern: str, value: str) -> bool:
+    clean_pattern = (pattern or "*").lower()
+    return fnmatch.fnmatchcase(value.lower(), clean_pattern)
+
+
+def mirror_context_for_tag(repo: str, tag: str, config: dict | None = None) -> dict:
+    for mirror in valid_mirrors(config or load_config()):
+        try:
+            target_repo, target_tag = image_repo_tag(mirror["target"])
+        except HTTPException:
+            continue
+        if target_repo == repo and target_tag == tag:
+            return mirror
+    return {}
+
+
+def default_protection_reasons(tag: str, environment: str = "") -> list[str]:
+    reasons = []
+    env = environment.lower()
+    if env in {"prod", "production"}:
+        reasons.append("protected_environment")
+    if re.match(r"^v\d", tag):
+        reasons.append("release_tag")
+    return reasons
+
+
+def protection_rule_rows(enabled_only: bool = False) -> list[dict]:
+    where = "WHERE enabled = 1" if enabled_only else ""
+    return db_rows(
+        f"""
+        SELECT id, name, repo_pattern, tag_pattern, environment, enabled, reason, created_at, updated_at
+        FROM tag_protection_rules
+        {where}
+        ORDER BY id
+        """
+    )
+
+
+def protection_result(repo: str, tag: str, environment: str = "") -> dict:
+    clean_repo, clean_tag = validate_repo_tag(repo, tag)
+    env = environment or mirror_context_for_tag(clean_repo, clean_tag).get("environment", "")
+    reasons = default_protection_reasons(clean_tag, env)
+    matched_rules = []
+    for row in protection_rule_rows(enabled_only=True):
+        if not pattern_matches(row["repo_pattern"], clean_repo):
+            continue
+        if not pattern_matches(row["tag_pattern"], clean_tag):
+            continue
+        rule_env = row.get("environment") or "*"
+        if rule_env != "*" and env and not pattern_matches(rule_env, env):
+            continue
+        if rule_env != "*" and not env:
+            continue
+        matched_rules.append(public_protection_rule(row))
+        reasons.append(row.get("reason") or row.get("name") or row["id"])
+    return {
+        "repo": clean_repo,
+        "tag": clean_tag,
+        "environment": env or "",
+        "protected": bool(reasons),
+        "reasons": reasons,
+        "rules": matched_rules,
+    }
+
+
+def assert_tag_mutation_allowed(repo: str, tag: str, action: str, environment: str = "") -> dict:
+    result = protection_result(repo, tag, environment)
+    if result["protected"]:
+        raise HTTPException(
+            409,
+            f"受保护 tag 不能执行 {action}: {repo}:{tag} ({', '.join(result['reasons'])})",
+        )
+    return result
+
+
+def public_protection_rule(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "repo_pattern": row["repo_pattern"],
+        "tag_pattern": row["tag_pattern"],
+        "environment": row["environment"],
+        "enabled": bool(row["enabled"]),
+        "reason": row.get("reason") or "",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def public_retention_policy(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "repo_pattern": row["repo_pattern"],
+        "environment": row["environment"],
+        "keep_last": int(row["keep_last"]),
+        "max_age_days": row.get("max_age_days"),
+        "enabled": bool(row["enabled"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def retention_policy_row(policy_id: str) -> dict:
+    clean_id = validate_slug(policy_id, "policy_id")
+    row = db_one(
+        """
+        SELECT id, name, repo_pattern, environment, keep_last, max_age_days, enabled, created_at, updated_at
+        FROM retention_policies
+        WHERE id = ?
+        """,
+        (clean_id,),
+    )
+    if not row:
+        raise HTTPException(404, "保留策略不存在")
+    return row
+
+
+def parse_iso(value: str) -> datetime:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def known_image_tags() -> list[dict]:
+    rows = db_rows(
+        """
+        SELECT source, target, status, new_digest, ended_at, started_at
+        FROM sync_run_items
+        WHERE target != ''
+        ORDER BY COALESCE(ended_at, started_at) DESC
+        """
+    )
+    seen = {}
+    config = load_config()
+    for row in rows:
+        try:
+            repo, tag = image_repo_tag(row["target"])
+        except HTTPException:
+            continue
+        ref = f"{repo}:{tag}"
+        if ref in seen:
+            continue
+        context = mirror_context_for_tag(repo, tag, config)
+        seen[ref] = {
+            "repo": repo,
+            "tag": tag,
+            "source": row.get("source") or "",
+            "target": row.get("target") or "",
+            "digest": row.get("new_digest") or "",
+            "status": row.get("status") or "",
+            "synced_at": row.get("ended_at") or row.get("started_at") or "",
+            "environment": context.get("environment", ""),
+        }
+    return list(seen.values())
+
+
+def retention_dry_run(policy: dict) -> dict:
+    public = public_retention_policy(policy)
+    now = datetime.now(timezone.utc)
+    grouped: dict[str, list[dict]] = {}
+    for item in known_image_tags():
+        if not pattern_matches(policy["repo_pattern"], item["repo"]):
+            continue
+        policy_env = policy.get("environment") or "*"
+        item_env = item.get("environment") or ""
+        if policy_env != "*" and not pattern_matches(policy_env, item_env):
+            continue
+        grouped.setdefault(item["repo"], []).append(item)
+
+    candidates = []
+    skipped_protected = []
+    keep_last = int(policy["keep_last"])
+    max_age_days = policy.get("max_age_days")
+    for repo, items in grouped.items():
+        sorted_items = sorted(items, key=lambda item: parse_iso(item["synced_at"]), reverse=True)
+        for index, item in enumerate(sorted_items):
+            reasons = []
+            if index >= keep_last:
+                reasons.append(f"exceeds_keep_last_{keep_last}")
+            if max_age_days:
+                age = now - parse_iso(item["synced_at"])
+                if age > timedelta(days=int(max_age_days)):
+                    reasons.append(f"older_than_{max_age_days}_days")
+            if not reasons:
+                continue
+            protection = protection_result(item["repo"], item["tag"], item.get("environment", ""))
+            entry = {**item, "reasons": reasons, "protection": protection}
+            if protection["protected"]:
+                skipped_protected.append(entry)
+            else:
+                candidates.append(entry)
+    return {"policy": public, "candidates": candidates, "skipped_protected": skipped_protected}
 
 
 def validate_registry_url(value: str) -> str:
@@ -1531,6 +1812,145 @@ def gc_guide() -> dict:
     }
 
 
+@app.get("/api/tag-protection")
+def list_tag_protection_rules():
+    return [public_protection_rule(row) for row in protection_rule_rows()]
+
+
+@app.post("/api/tag-protection", dependencies=[Depends(require_write_token)])
+def upsert_tag_protection_rule(body: TagProtectionRuleIn):
+    rule_id = validate_slug(body.id or slug_candidate(body.name, "protect"), "rule_id")
+    now = now_iso()
+    existing = db_one("SELECT id, created_at FROM tag_protection_rules WHERE id = ?", (rule_id,))
+    params = (
+        rule_id,
+        body.name.strip(),
+        body.repo_pattern.strip(),
+        body.tag_pattern.strip(),
+        body.environment.strip() or "*",
+        1 if body.enabled else 0,
+        body.reason or "",
+        existing["created_at"] if existing else now,
+        now,
+    )
+    if existing:
+        db_execute(
+            """
+            UPDATE tag_protection_rules
+            SET name = ?, repo_pattern = ?, tag_pattern = ?, environment = ?, enabled = ?, reason = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (params[1], params[2], params[3], params[4], params[5], params[6], params[8], rule_id),
+        )
+    else:
+        db_execute(
+            """
+            INSERT INTO tag_protection_rules(id, name, repo_pattern, tag_pattern, environment, enabled, reason, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+    audit_log("upsert", "tag_protection_rule", rule_id, {"repo_pattern": body.repo_pattern, "tag_pattern": body.tag_pattern, "environment": body.environment, "enabled": body.enabled})
+    return {"ok": True, "rule": public_protection_rule(db_one("SELECT * FROM tag_protection_rules WHERE id = ?", (rule_id,)))}
+
+
+@app.delete("/api/tag-protection/{rule_id}", dependencies=[Depends(require_write_token)])
+def delete_tag_protection_rule(rule_id: str):
+    clean_id = validate_slug(rule_id, "rule_id")
+    db_execute("DELETE FROM tag_protection_rules WHERE id = ?", (clean_id,))
+    audit_log("delete", "tag_protection_rule", clean_id, {})
+    return {"ok": True}
+
+
+@app.get("/api/tag-protection/check")
+def check_tag_protection(repo: str, tag: str, environment: str = ""):
+    return protection_result(repo, tag, environment)
+
+
+@app.get("/api/retention-policies")
+def list_retention_policies():
+    rows = db_rows(
+        """
+        SELECT id, name, repo_pattern, environment, keep_last, max_age_days, enabled, created_at, updated_at
+        FROM retention_policies
+        ORDER BY id
+        """
+    )
+    return [public_retention_policy(row) for row in rows]
+
+
+@app.post("/api/retention-policies", dependencies=[Depends(require_write_token)])
+def upsert_retention_policy(body: RetentionPolicyIn):
+    policy_id = validate_slug(body.id or slug_candidate(body.name, "retention"), "policy_id")
+    now = now_iso()
+    existing = db_one("SELECT id, created_at FROM retention_policies WHERE id = ?", (policy_id,))
+    params = (
+        policy_id,
+        body.name.strip(),
+        body.repo_pattern.strip(),
+        body.environment.strip() or "*",
+        body.keep_last,
+        body.max_age_days,
+        1 if body.enabled else 0,
+        existing["created_at"] if existing else now,
+        now,
+    )
+    if existing:
+        db_execute(
+            """
+            UPDATE retention_policies
+            SET name = ?, repo_pattern = ?, environment = ?, keep_last = ?, max_age_days = ?, enabled = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (params[1], params[2], params[3], params[4], params[5], params[6], params[8], policy_id),
+        )
+    else:
+        db_execute(
+            """
+            INSERT INTO retention_policies(id, name, repo_pattern, environment, keep_last, max_age_days, enabled, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            params,
+        )
+    audit_log("upsert", "retention_policy", policy_id, {"repo_pattern": body.repo_pattern, "environment": body.environment, "enabled": body.enabled})
+    return {"ok": True, "policy": public_retention_policy(retention_policy_row(policy_id))}
+
+
+@app.delete("/api/retention-policies/{policy_id}", dependencies=[Depends(require_write_token)])
+def delete_retention_policy(policy_id: str):
+    row = retention_policy_row(policy_id)
+    db_execute("DELETE FROM retention_policies WHERE id = ?", (row["id"],))
+    audit_log("delete", "retention_policy", row["id"], {})
+    return {"ok": True}
+
+
+@app.post("/api/retention-policies/{policy_id}/dry-run", dependencies=[Depends(require_write_token)])
+def dry_run_retention_policy(policy_id: str):
+    row = retention_policy_row(policy_id)
+    result = retention_dry_run(row)
+    audit_log("dry_run", "retention_policy", row["id"], {"candidates": len(result["candidates"]), "skipped_protected": len(result["skipped_protected"])})
+    return result
+
+
+@app.post("/api/retention-policies/{policy_id}/apply", dependencies=[Depends(require_write_token)])
+def apply_retention_policy(policy_id: str):
+    row = retention_policy_row(policy_id)
+    result = retention_dry_run(row)
+    created = []
+    for candidate in result["candidates"]:
+        db_execute(
+            """
+            INSERT INTO deletion_marks(repo, tag, reason, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(repo, tag) DO UPDATE SET reason = excluded.reason, created_at = excluded.created_at
+            """,
+            (candidate["repo"], candidate["tag"], f"retention:{row['id']}:{','.join(candidate['reasons'])}", now_iso()),
+        )
+        created.append(f"{candidate['repo']}:{candidate['tag']}")
+    audit_log("apply", "retention_policy", row["id"], {"marked": created, "skipped_protected": len(result["skipped_protected"])})
+    return {"ok": True, "marked": created, "dry_run": result}
+
+
 @app.get("/api/storage")
 async def get_storage():
     registry_error = ""
@@ -1576,9 +1996,119 @@ async def get_storage():
     }
 
 
+@app.get("/api/storage/search")
+async def search_storage(q: str = "", status: str = "", limit: int = 100):
+    storage = await get_storage()
+    term = q.strip().lower()
+    status_filter = status.strip().lower()
+    results = []
+    for image in storage["images"]:
+        for tag in image.get("tags", []):
+            ref = f"{image['repo']}:{tag['name']}"
+            protection = protection_result(image["repo"], tag["name"])
+            item_status = "marked" if tag.get("marked_for_deletion") else ("protected" if protection["protected"] else "active")
+            if term and term not in ref.lower() and term not in json.dumps(protection, ensure_ascii=False).lower():
+                continue
+            if status_filter and status_filter != item_status:
+                continue
+            results.append(
+                {
+                    "repo": image["repo"],
+                    "tag": tag["name"],
+                    "ref": ref,
+                    "status": item_status,
+                    "deletion_mark": tag.get("deletion_mark"),
+                    "protection": protection,
+                }
+            )
+            if len(results) >= min(limit, 500):
+                return {"items": results, "registry_error": storage["registry_error"]}
+    return {"items": results, "registry_error": storage["registry_error"]}
+
+
+@app.get("/api/storage/images/{repo:path}/tags/{tag}")
+def get_storage_image_detail(repo: str, tag: str):
+    clean_repo, clean_tag = validate_repo_tag(repo, tag)
+    mark = db_one("SELECT id, repo, tag, reason, created_at FROM deletion_marks WHERE repo = ? AND tag = ?", (clean_repo, clean_tag))
+    latest_item = db_one(
+        """
+        SELECT id, run_id, source, target, copy_target, status, old_digest, new_digest, step, error, started_at, ended_at
+        FROM sync_run_items
+        WHERE target LIKE ?
+        ORDER BY id DESC
+        """,
+        (f"%/{clean_repo}:{clean_tag}",),
+    )
+    context = mirror_context_for_tag(clean_repo, clean_tag)
+    return {
+        "repo": clean_repo,
+        "tag": clean_tag,
+        "digest": latest_item.get("new_digest") if latest_item else "",
+        "source": context.get("source", latest_item.get("source") if latest_item else ""),
+        "target": context.get("target", latest_item.get("target") if latest_item else ""),
+        "environment": context.get("environment", ""),
+        "deletion_mark": mark,
+        "protection": protection_result(clean_repo, clean_tag, context.get("environment", "")),
+        "latest_sync_item": latest_item,
+        "estimated_size_bytes": estimate_repo_size(clean_repo),
+    }
+
+
+@app.get("/api/backup-restore-guide")
+def get_backup_restore_guide():
+    return {
+        "required_items": [
+            "config/",
+            "data/registry/",
+            "data/mirror-registry.db",
+            ".env",
+            "CREDENTIALS_SECRET_KEY",
+        ],
+        "backup_commands": [
+            "docker compose stop registry",
+            "Compress-Archive -Path config,data\\registry,data\\mirror-registry.db,.env -DestinationPath mirror-registry-backup.zip -Force",
+            "docker compose start registry",
+        ],
+        "restore_steps": [
+            "还原 config/、data/registry/、SQLite 数据库和 .env。",
+            "先设置原始 CREDENTIALS_SECRET_KEY，再启动 panel 进行只读验证。",
+            "通过 /api/backup-restore/verify 确认配置、数据库和 registry 数据可读。",
+            "确认至少一个已同步 tag 可通过 Registry API 读取后，再启动 sync 写入。",
+        ],
+        "readonly_verification": [
+            "docker compose up -d registry panel",
+            "curl http://localhost:8080/api/status",
+            "curl http://localhost:5000/v2/_catalog",
+        ],
+        "tls_entry": {
+            "panel": "面板入口建议只暴露 HTTPS，并叠加 Basic Auth 或 SSO。",
+            "registry": "Registry /v2/ 入口必须单独配置 HTTPS，跨机器长期使用时不要裸 HTTP 暴露。",
+        },
+    }
+
+
+@app.post("/api/backup-restore/verify", dependencies=[Depends(require_write_token)])
+def verify_backup_restore_readiness(body: BackupRestoreVerifyIn):
+    try:
+        db_rows("SELECT 1")
+        database_ok = True
+    except HTTPException:
+        database_ok = False
+    checks = [
+        {"name": "config", "ok": CONFIG_PATH.exists(), "path": str(CONFIG_PATH)},
+        {"name": "database", "ok": database_ok, "path": str(DB_PATH)},
+        {"name": "registry_storage", "ok": REGISTRY_STORAGE_PATH.exists(), "path": str(REGISTRY_STORAGE_PATH)},
+        {"name": "credentials_secret", "ok": bool(CREDENTIALS_SECRET_KEY.strip()) or not body.require_credentials_secret, "path": "CREDENTIALS_SECRET_KEY"},
+    ]
+    ok_status = all(item["ok"] for item in checks)
+    audit_log("verify", "backup_restore", "readiness", {"ok": ok_status, "failed": [item["name"] for item in checks if not item["ok"]]})
+    return {"ok": ok_status, "checks": checks, "guide": get_backup_restore_guide()}
+
+
 @app.post("/api/storage/delete-mark", dependencies=[Depends(require_write_token)])
 def mark_image_for_delete(body: StorageDeleteMarkIn):
     repo, tag = validate_repo_tag(body.repo, body.tag)
+    protection = assert_tag_mutation_allowed(repo, tag, "delete-mark")
     mark_id = db_execute(
         """
         INSERT INTO deletion_marks(repo, tag, reason, created_at)
@@ -1587,8 +2117,8 @@ def mark_image_for_delete(body: StorageDeleteMarkIn):
         """,
         (repo, tag, body.reason or "", now_iso()),
     )
-    audit_log("mark_delete", "image", f"{repo}:{tag}", {"reason": body.reason or ""})
-    return {"ok": True, "id": mark_id, "repo": repo, "tag": tag}
+    audit_log("mark_delete", "image", f"{repo}:{tag}", {"reason": body.reason or "", "protection": protection})
+    return {"ok": True, "id": mark_id, "repo": repo, "tag": tag, "protection": protection}
 
 
 @app.delete("/api/storage/delete-mark/{mark_id}", dependencies=[Depends(require_write_token)])
@@ -1613,6 +2143,11 @@ def get_security_guide():
             "  auth_basic_user_file /etc/nginx/.htpasswd;",
             "  proxy_pass http://127.0.0.1:8080;",
             "}",
+        ],
+        "tls_reverse_proxy": [
+            "管理面板入口和 Registry /v2/ 入口分开配置 server_name 和证书。",
+            "Registry /v2/ 长期跨机器使用必须走 HTTPS；仅本机 compose 内部流量可以保留 HTTP。",
+            "不要把 sync 服务端口暴露到公网；sync 不需要入站流量。",
         ],
     }
 

@@ -1,8 +1,10 @@
 import json
 import base64
+import fnmatch
 import hashlib
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -153,6 +155,18 @@ CREATE TABLE IF NOT EXISTS credentials (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tag_protection_rules (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    repo_pattern TEXT NOT NULL,
+    tag_pattern TEXT NOT NULL,
+    environment TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -251,6 +265,19 @@ POSTGRES_SCHEMA_STATEMENTS = [
         username VARCHAR(255) NOT NULL,
         encrypted_secret TEXT NOT NULL,
         scope VARCHAR(16) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS tag_protection_rules (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        repo_pattern VARCHAR(255) NOT NULL,
+        tag_pattern VARCHAR(128) NOT NULL,
+        environment VARCHAR(64) NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        reason TEXT,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
     )
@@ -650,6 +677,50 @@ def image_registry_host(value: str) -> str:
     return "docker.io"
 
 
+def image_repo_tag(image: str) -> tuple[str, str]:
+    value = image.strip()
+    first, rest = (value.split("/", 1) + [""])[:2]
+    without_registry = rest if rest and ("." in first or ":" in first or first == "localhost") else value
+    if ":" not in without_registry:
+        return without_registry, ""
+    repo, tag = without_registry.rsplit(":", 1)
+    return repo, tag
+
+
+def pattern_matches(pattern: str, value: str) -> bool:
+    return fnmatch.fnmatchcase(value.lower(), (pattern or "*").lower())
+
+
+def load_tag_protection_rules() -> list[dict]:
+    return db_rows(
+        """
+        SELECT id, name, repo_pattern, tag_pattern, environment, enabled, reason
+        FROM tag_protection_rules
+        WHERE enabled = 1
+        ORDER BY id
+        """
+    )
+
+
+def tag_protection_reasons(repo: str, tag: str, environment: str = "", rules: list[dict] | None = None) -> list[str]:
+    reasons = []
+    env = (environment or "").lower()
+    if env in {"prod", "production"}:
+        reasons.append("protected_environment")
+    if re.match(r"^v\d", tag or ""):
+        reasons.append("release_tag")
+    for row in rules if rules is not None else load_tag_protection_rules():
+        if not pattern_matches(str(row.get("repo_pattern") or "*"), repo):
+            continue
+        if not pattern_matches(str(row.get("tag_pattern") or "*"), tag):
+            continue
+        rule_env = str(row.get("environment") or "*")
+        if rule_env != "*" and (not environment or not pattern_matches(rule_env, environment)):
+            continue
+        reasons.append(str(row.get("reason") or row.get("name") or row.get("id") or "protected_rule"))
+    return reasons
+
+
 def credential_fernet() -> Fernet | None:
     secret = CREDENTIALS_SECRET_KEY.strip()
     if not secret:
@@ -963,6 +1034,16 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
         },
     )
 
+    target_repo, target_tag = image_repo_tag(resolve_copy_target(target))
+    protection_reasons = tag_protection_reasons(target_repo, target_tag, str(mirror.get("environment") or ""))
+    if protection_reasons:
+        message = f"受保护 tag 不允许自动覆盖: {target_repo}:{target_tag} ({', '.join(protection_reasons)})"
+        logger.warning(message)
+        record_event("ERROR", message, run_id, source, target)
+        audit_log("copy_blocked", "image", f"{target_repo}:{target_tag}", {"source": source, "target": target, "reasons": protection_reasons})
+        update_run_item(item_id, "failed", step="protection", error=message, started_at_monotonic=started_at)
+        return "failed"
+
     authfile = ""
     try:
         credentials = load_credentials()
@@ -1005,6 +1086,7 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
             logger.info("同步完成: %s", target)
             record_event("INFO", "同步完成", run_id, source, target)
             audit_log("copy_success", "mirror", source, {"target": target, "copy_target": copy_target, "digest": remote})
+            audit_log("tag_written", "image", f"{target_repo}:{target_tag}", {"source": source, "target": target, "copy_target": copy_target, "digest": remote, "run_id": run_id})
             update_run_item(
                 item_id,
                 "success",
