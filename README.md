@@ -95,6 +95,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 
 完整 smoke 会检查 Docker Compose 配置、面板登录、Bearer token 自动化入口、Registry `/v2/`、诊断 API、备份恢复只读校验；在 `-StartServices` 且未传 `-SkipSync` 时，还会触发默认镜像同步并确认本地 Registry 中出现 `library/busybox:latest`。如果管理员账号已经在旧数据卷中初始化且密码不同，可通过 `-AdminUsername` 和 `-AdminPassword` 覆盖登录凭据。
 
+### 运维摘要和发布检查
+
+概览页会加载 `/api/ops/summary`，集中展示健康状态、最近同步失败、磁盘状态、删除标记和当前版本。常见认证、TLS、网络、DNS、manifest、磁盘和 `skopeo` 错误会映射为可读原因与建议，原始错误仍保留在任务明细中。
+
+需要给他人排障时，可在概览页导出诊断包，或调用 `/api/ops/diagnostic-bundle`。诊断包包含版本、配置摘要、诊断结果、最近任务、最近失败和事件，但会脱敏 password、token、session cookie、authfile、Authorization 和加密凭据字段。升级说明可通过 `/api/ops/upgrade-guide` 查看，覆盖环境变量、数据卷、备份和兼容性检查。
+
+正式发版前可使用本地 release checklist 阻断缺少版本号、镜像 tag、版本说明、README 或 smoke 结果的发布准备：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1.0.0 -ImageTag v1.0.0 -SmokeResultPath .\smoke-result.txt
+```
+
+`ImageTag` 默认不允许使用 `latest`，除非显式传入 `-AllowLatest`。如果只想检查版本说明和 smoke 文件而暂时跳过构建，可传入 `-SkipBuildChecks`；正式发布前仍应运行完整校验。
+
 ## 前端工程化与仓库凭据
 
 - 管理面板前端使用 React + Vite + TypeScript 开发，构建产物继续由 FastAPI 静态托管。

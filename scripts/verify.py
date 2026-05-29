@@ -81,6 +81,7 @@ def require_paths() -> None:
         "scripts/check-runtime.ps1",
         "scripts/prod-smoke.ps1",
         "scripts/restore-drill.ps1",
+        "scripts/release-check.ps1",
         "scripts/build-dev-images.ps1",
         "tests/test_panel.py",
         "tests/test_sync.py",
@@ -366,6 +367,16 @@ def require_panel_features() -> None:
         "preflight_mirrors_batch",
         "probe_source_manifest",
         "probe_registry_v2",
+        "explain_operational_error",
+        "recent_failed_items",
+        "deletion_mark_count",
+        "build_ops_summary",
+        "sanitize_for_export",
+        "build_diagnostic_bundle",
+        "build_upgrade_guide",
+        "get_ops_summary",
+        "get_ops_upgrade_guide",
+        "get_ops_diagnostic_bundle",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -467,6 +478,15 @@ def require_panel_features() -> None:
         "check_remote",
         "上游 manifest",
         "目标 Registry /v2/",
+        "@app.get(\"/api/ops/summary\")",
+        "@app.get(\"/api/ops/diagnostic-bundle\")",
+        "@app.get(\"/api/ops/upgrade-guide\")",
+        "SENSITIVE_EXPORT_KEYS",
+        "Bearer <redacted>",
+        "<redacted>@",
+        "latest_run_failed",
+        "pending_deletion_marks",
+        "diagnostic-bundle",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -639,6 +659,11 @@ def require_frontend_features() -> None:
         "验证诊断",
         "同步任务",
         "using_default_token",
+        "/ops/summary",
+        "/ops/diagnostic-bundle",
+        "运维摘要",
+        "导出诊断包",
+        "最近失败",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -718,6 +743,12 @@ def require_tests_and_docs() -> None:
         "test_mirror_preflight_batch_defaults_to_config_and_remote_probe",
         "package_manifest",
         "restore-drill.ps1",
+        "/api/ops/summary",
+        "/api/ops/diagnostic-bundle",
+        "/api/ops/upgrade-guide",
+        "test_ops_summary_explains_recent_failures_and_risk_flags",
+        "test_diagnostic_bundle_redacts_secrets_and_includes_ops_context",
+        "test_upgrade_guide_and_release_check_script_are_available",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -763,6 +794,10 @@ def require_tests_and_docs() -> None:
         "python -m pytest",
         "docker compose config",
         "docker compose -f docker-compose.dev.yml config",
+        "运维摘要",
+        "诊断包",
+        "升级说明",
+        "scripts\\release-check.ps1",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -799,6 +834,10 @@ def require_tests_and_docs() -> None:
         "-StartServices",
         "-AllowInsecureLocal",
         "-SkipSync",
+        "Operations Summary",
+        "diagnostic bundle",
+        "upgrade guide",
+        "scripts\\release-check.ps1",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -868,6 +907,20 @@ def require_tests_and_docs() -> None:
     ]:
         if snippet not in restore_drill_script:
             fail(f"scripts/restore-drill.ps1 missing {snippet!r}")
+    release_check_script = read("scripts/release-check.ps1")
+    for snippet in [
+        "Version",
+        "ImageTag",
+        "SmokeResultPath",
+        "CHANGELOG.md",
+        "python scripts\\verify.py",
+        "npm.cmd run build",
+        "python -m pytest",
+        "latest",
+        "Release checklist failed",
+    ]:
+        if snippet not in release_check_script:
+            fail(f"scripts/release-check.ps1 missing {snippet!r}")
     dev_script = read("scripts/build-dev-images.ps1")
     for snippet in [
         "Get-Command gh",

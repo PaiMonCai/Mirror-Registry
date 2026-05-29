@@ -86,6 +86,7 @@ function App() {
   const [theme, setTheme] = useState(localStorage.getItem('mirrorRegistryTheme') || 'light');
   const [auth, setAuth] = useState<AnyRecord>({ loading: true, authenticated: false });
   const [status, setStatus] = useState<AnyRecord>({});
+  const [opsSummary, setOpsSummary] = useState<AnyRecord>({});
   const [mirrors, setMirrors] = useState<AnyRecord[]>([]);
   const [runs, setRuns] = useState<AnyRecord[]>([]);
   const [selectedRun, setSelectedRun] = useState<AnyRecord | null>(null);
@@ -139,8 +140,12 @@ function App() {
   }
 
   async function loadStatus() {
-    const data = await api('GET', '/status');
+    const [data, ops] = await Promise.all([
+      api('GET', '/status'),
+      api('GET', '/ops/summary'),
+    ]);
     setStatus(data);
+    setOpsSummary(ops);
   }
 
   async function loadMirrors() {
@@ -300,7 +305,7 @@ function App() {
           </div>
         </header>
 
-        {view === 'dashboard' && <Dashboard status={status} reload={() => action('已刷新', loadStatus)} />}
+        {view === 'dashboard' && <Dashboard status={status} ops={opsSummary} api={api} notify={notify} reload={() => action('已刷新', loadStatus)} />}
         {view === 'runs' && <Runs runs={runs} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
@@ -372,26 +377,50 @@ function LoginScreen({ auth, login, theme, setTheme }: { auth: AnyRecord; login:
   );
 }
 
-function Dashboard({ status, reload }: { status: AnyRecord; reload: () => void }) {
+function Dashboard({ status, ops, api, notify, reload }: { status: AnyRecord; ops: AnyRecord; api: any; notify: (message: string) => void; reload: () => void }) {
+  const failures = ops.sync?.recent_failures || [];
+  async function exportBundle() {
+    try {
+      const bundle = await api('GET', '/ops/diagnostic-bundle');
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `mirror-registry-diagnostic-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      notify('诊断包已导出');
+    } catch (error: any) {
+      notify(error.message);
+    }
+  }
   const cards = [
-    ['镜像', status.total ?? 0],
-    ['已同步', status.synced ?? 0],
-    ['待同步', status.pending ?? 0],
-    ['Registry', status.registries ?? 1],
-    ['镜像组', status.mirror_groups ?? 1],
-    ['状态', status.sync_running ? '运行中' : '就绪'],
+    ['健康', <Badge value={ops.health || 'ok'} />],
+    ['镜像', ops.config?.mirrors ?? status.total ?? 0],
+    ['待同步', ops.config?.pending ?? status.pending ?? 0],
+    ['失败', failures.length],
+    ['删除标记', ops.storage?.deletion_marks ?? 0],
+    ['版本', ops.version?.image_tag || status.image_tag || '-'],
   ];
   return (
     <section className="stack">
       <div className="metric-grid">{cards.map(([label, value]) => <Metric key={label} label={label as string} value={value} />)}</div>
-      <Panel title="运行信息" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+      <Panel title="运维摘要" action={<div className="row-actions"><button onClick={reload}><RefreshCw size={16} />刷新</button><button onClick={exportBundle}><FileKey2 size={16} />导出诊断包</button></div>}>
         <dl className="kv">
           <dt>应用版本</dt><dd>{status.app_version || '-'}</dd>
           <dt>镜像 tag</dt><dd>{status.image_tag || '-'}</dd>
           <dt>同步引擎</dt><dd>{status.sync_engine || 'skopeo'}</dd>
           <dt>上次心跳</dt><dd>{status.last_heartbeat || '-'}</dd>
+          <dt>健康原因</dt><dd>{(ops.reasons || []).join(', ') || '-'}</dd>
+          <dt>最近任务</dt><dd>{ops.sync?.latest_run ? `${ops.sync.latest_run.status} · failed ${ops.sync.latest_run.failed}` : '-'}</dd>
+          <dt>磁盘状态</dt><dd>{ops.storage?.disk_low ? '低空间' : '正常'} {ops.storage?.disk_free_bytes || ''}</dd>
         </dl>
       </Panel>
+      {failures.length > 0 && <Panel title="最近失败">
+        <table><thead><tr><th>镜像</th><th>阶段</th><th>原因</th><th>建议</th></tr></thead>
+          <tbody>{failures.map((item: AnyRecord) => <tr key={item.id}><td>{item.source}</td><td>{item.step || '-'}</td><td>{item.explanation?.reason || item.error}</td><td>{item.explanation?.suggestion || '-'}</td></tr>)}</tbody>
+        </table>
+      </Panel>}
     </section>
   );
 }

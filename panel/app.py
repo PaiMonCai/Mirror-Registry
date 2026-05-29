@@ -1836,6 +1836,187 @@ def latest_run() -> dict | None:
     )
 
 
+def explain_operational_error(message: str | None) -> dict:
+    text_value = (message or "").strip()
+    lower = text_value.lower()
+    if not text_value:
+        return {"category": "none", "reason": "", "suggestion": ""}
+    rules = [
+        (["unauthorized", "authentication", "denied", "401", "403", "credentials"], "auth", "认证或权限失败", "检查源/目标仓库凭据、scope 和 token 权限。"),
+        (["x509", "certificate", "tls", "ssl"], "tls", "TLS 或证书失败", "检查 Registry HTTPS 证书、反向代理和容器信任链。"),
+        (["timeout", "timed out", "deadline"], "timeout", "网络超时", "检查网络连通性、代理、上游 Registry 状态和超时配置。"),
+        (["connection refused", "connecterror", "no route", "network is unreachable"], "network", "网络不可达", "确认 Registry 服务、DNS、端口和容器网络。"),
+        (["no such host", "name resolution", "dns"], "dns", "DNS 解析失败", "检查 registry host、容器 DNS 和代理配置。"),
+        (["manifest unknown", "not found", "404"], "manifest", "镜像或 tag 不存在", "确认 source image ref 和 tag 是否存在且带显式 tag。"),
+        (["no space", "disk", "filesystem"], "storage", "磁盘或存储问题", "检查磁盘余量、删除标记和 Registry garbage-collect 流程。"),
+        (["skopeo", "inspect", "copy"], "skopeo", "skopeo 执行失败", "查看任务阶段、copy target、authfile 凭据匹配和 sync 镜像版本。"),
+    ]
+    for needles, category, reason, suggestion in rules:
+        if any(needle in lower for needle in needles):
+            return {"category": category, "reason": reason, "suggestion": suggestion}
+    return {"category": "unknown", "reason": "未分类错误", "suggestion": "保留原始错误，结合诊断包、任务明细和 sync 日志继续定位。"}
+
+
+def recent_failed_items(limit: int = 5) -> list[dict]:
+    rows = db_rows(
+        """
+        SELECT id, run_id, source, target, copy_target, status, step, error, started_at, ended_at, duration_ms
+        FROM sync_run_items
+        WHERE status = 'failed'
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, min(limit, 50)),),
+    )
+    for row in rows:
+        row["explanation"] = explain_operational_error(row.get("error") or row.get("step") or "")
+    return rows
+
+
+def deletion_mark_count() -> int:
+    row = db_one("SELECT COUNT(*) AS count FROM deletion_marks")
+    return int(row.get("count") or 0) if row else 0
+
+
+def build_ops_summary() -> dict:
+    status = get_status()
+    latest = status.get("latest_run")
+    failures = recent_failed_items(5)
+    deletion_count = deletion_mark_count()
+    health = "ok"
+    reasons = []
+    if status.get("disk_low"):
+        health = "error"
+        reasons.append("disk_low")
+    if latest and int(latest.get("failed") or 0) > 0:
+        health = "error"
+        reasons.append("latest_run_failed")
+    if status.get("is_syncing"):
+        reasons.append("sync_active")
+    if deletion_count:
+        reasons.append("pending_deletion_marks")
+        if health == "ok":
+            health = "warn"
+    if status.get("using_default_token"):
+        reasons.append("default_panel_token")
+        if health == "ok":
+            health = "warn"
+    return {
+        "health": health,
+        "reasons": reasons,
+        "generated_at": now_iso(),
+        "version": {"app_version": APP_VERSION, "image_tag": IMAGE_TAG},
+        "sync": {
+            "running": bool(status.get("is_syncing")),
+            "latest_run": latest,
+            "recent_failures": failures,
+        },
+        "storage": {
+            "disk_low": bool(status.get("disk_low")),
+            "disk_free_bytes": status.get("disk_free_bytes"),
+            "deletion_marks": deletion_count,
+        },
+        "config": {
+            "mirrors": status["total"],
+            "synced": status["synced"],
+            "pending": status["pending"],
+            "registries": status["registries"],
+            "mirror_groups": status["mirror_groups"],
+            "database_backend": status["database_backend"],
+        },
+        "security": {
+            "auth_required": status["auth_required"],
+            "admin_initialized": status["admin_initialized"],
+            "using_default_token": status["using_default_token"],
+        },
+    }
+
+
+SENSITIVE_EXPORT_KEYS = {"secret", "token", "password", "cookie", "authfile", "encrypted_secret", "authorization"}
+
+
+def sanitize_for_export(value):
+    if isinstance(value, dict):
+        clean = {}
+        for key, item in value.items():
+            key_text = str(key).lower()
+            if any(marker in key_text for marker in SENSITIVE_EXPORT_KEYS):
+                clean["<redacted>"] = "<redacted>"
+            else:
+                clean[key] = sanitize_for_export(item)
+        return clean
+    if isinstance(value, list):
+        return [sanitize_for_export(item) for item in value]
+    if isinstance(value, str):
+        redacted = value
+        redacted = re.sub(r"Bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", redacted)
+        redacted = re.sub(r"(?i)(password|token|secret)=([^\s&]+)", r"\1=<redacted>", redacted)
+        redacted = re.sub(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/@:\s]+:[^/@\s]+@", r"\1<redacted>@", redacted)
+        return redacted
+    return value
+
+
+async def build_diagnostic_bundle() -> dict:
+    config = load_config()
+    diagnostics = await run_diagnostics()
+    recent_runs = list_sync_runs(limit=10)
+    events = list_events(limit=50)
+    bundle = {
+        "generated_at": now_iso(),
+        "version": {"app_version": APP_VERSION, "image_tag": IMAGE_TAG},
+        "summary": build_ops_summary(),
+        "config_summary": {
+            "mirrors": len(valid_mirrors(config)),
+            "registries": len(registry_map(config)),
+            "mirror_groups": len(group_map(config)),
+            "settings": settings_with_defaults(),
+        },
+        "diagnostics": diagnostics,
+        "recent_runs": recent_runs,
+        "recent_failures": recent_failed_items(20),
+        "events": events,
+        "deletion_marks": deletion_mark_count(),
+        "upgrade_guide": build_upgrade_guide(),
+    }
+    return sanitize_for_export(bundle)
+
+
+def build_upgrade_guide() -> dict:
+    return {
+        "principles": [
+            "升级前先备份 config/、data/registry/、data/mirror-registry.db、.env 和 CREDENTIALS_SECRET_KEY。",
+            "先运行只读恢复演练和生产 smoke，再启动 sync 写入。",
+            "正式 release 仍由 v* tag 触发，latest 表示最新正式版本。",
+        ],
+        "environment_variables": [
+            "MIRROR_REGISTRY_IMAGE_TAG",
+            "PANEL_TOKEN",
+            "ADMIN_USERNAME",
+            "ADMIN_PASSWORD",
+            "CREDENTIALS_SECRET_KEY",
+            "SESSION_COOKIE_SECURE",
+            "DATABASE_URL",
+        ],
+        "volumes": [
+            "mirror-registry-config:/config",
+            "mirror-registry-data:/data",
+            "mirror-registry-storage:/var/lib/registry",
+        ],
+        "commands": [
+            "python scripts\\verify.py",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\restore-drill.ps1",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\prod-smoke.ps1 -AllowInsecureLocal",
+            "docker compose pull",
+            "docker compose up -d",
+        ],
+        "compatibility": [
+            "SQLite remains the default database path.",
+            "PANEL_TOKEN remains supported for automation Bearer calls.",
+            "sync continues to use skopeo and does not require host Docker socket.",
+        ],
+    }
+
+
 def summarize_platform(config: dict) -> dict:
     mirrors = valid_mirrors(config)
     registries = registry_map(config)
@@ -1984,6 +2165,21 @@ def get_status():
         "disk_low": runtime.get("disk_low", {}).get("value") == "true",
         "latest_run": latest_run(),
     }
+
+
+@app.get("/api/ops/summary")
+def get_ops_summary():
+    return build_ops_summary()
+
+
+@app.get("/api/ops/upgrade-guide")
+def get_ops_upgrade_guide():
+    return build_upgrade_guide()
+
+
+@app.get("/api/ops/diagnostic-bundle")
+async def get_ops_diagnostic_bundle():
+    return await build_diagnostic_bundle()
 
 
 @app.get("/api/mirrors")

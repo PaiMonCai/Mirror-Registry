@@ -1,5 +1,6 @@
 import importlib
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -966,3 +967,125 @@ def test_storage_returns_marks_and_cached_stats_when_registry_unavailable(panel_
     assert storage["registry_error"] == "registry down"
     assert storage["stats_cached"] is True
     assert storage["deletion_marks"][0]["repo"] == "library/busybox"
+
+
+def test_ops_summary_explains_recent_failures_and_risk_flags(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    import panel.main as panel_main
+
+    run_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, ended_at, failed, total) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("manual", "failed", None, panel_main.now_iso(), panel_main.now_iso(), 1, 1),
+    )
+    panel_main.db_execute(
+        """
+        INSERT INTO sync_run_items(run_id, source, target, copy_target, status, step, error, started_at, ended_at, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            "docker.io/library/missing:1.0.0",
+            "localhost:5000/library/missing:1.0.0",
+            "registry:5000/library/missing:1.0.0",
+            "failed",
+            "inspect",
+            "manifest unknown: requested image not found",
+            panel_main.now_iso(),
+            panel_main.now_iso(),
+            1234,
+        ),
+    )
+    client.post(
+        "/api/storage/delete-mark",
+        json={"repo": "library/busybox", "tag": "old", "reason": "cleanup"},
+        headers=headers,
+    )
+
+    response = client.get("/api/ops/summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["health"] == "error"
+    assert "latest_run_failed" in data["reasons"]
+    assert "pending_deletion_marks" in data["reasons"]
+    assert "default_panel_token" not in data["reasons"]
+    assert data["storage"]["deletion_marks"] == 1
+    assert data["sync"]["latest_run"]["id"] == run_id
+    failure = data["sync"]["recent_failures"][0]
+    assert failure["source"] == "docker.io/library/missing:1.0.0"
+    assert failure["explanation"]["category"] == "manifest"
+    assert "tag" in failure["explanation"]["suggestion"]
+
+
+def test_diagnostic_bundle_redacts_secrets_and_includes_ops_context(panel_app, monkeypatch):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    import panel.main as panel_main
+
+    async def fake_run_diagnostics():
+        return {
+            "status": "warn",
+            "checks": [
+                {
+                    "name": "Auth probe",
+                    "status": "warn",
+                    "message": "Bearer test-token password=plain secret=plain",
+                    "suggestion": "check postgresql://mirror:top-secret@db:5432/mirror",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(panel_main, "run_diagnostics", fake_run_diagnostics)
+    assert client.post(
+        "/api/credentials",
+        json={
+            "id": "dockerhub",
+            "name": "Docker Hub",
+            "registry_host": "docker.io",
+            "username": "alice",
+            "secret": "top-secret",
+            "scope": "both",
+        },
+        headers=headers,
+    ).status_code == 200
+    panel_main.audit_log(
+        "probe",
+        "release",
+        "v1.2.3",
+        {"Authorization": "Bearer test-token", "url": "postgresql://mirror:top-secret@db:5432/mirror"},
+    )
+
+    response = client.get("/api/ops/diagnostic-bundle")
+
+    assert response.status_code == 200
+    bundle = response.json()
+    assert "summary" in bundle
+    assert "config_summary" in bundle
+    assert "diagnostics" in bundle
+    assert "recent_runs" in bundle
+    assert "events" in bundle
+    assert "upgrade_guide" in bundle
+    bundle_text = json.dumps(bundle, ensure_ascii=False)
+    assert "top-secret" not in bundle_text
+    assert "unit-secret-key" not in bundle_text
+    assert "test-token" not in bundle_text
+    assert "encrypted_secret" not in bundle_text
+    assert "Authorization" not in bundle_text
+    assert "Bearer <redacted>" in bundle_text
+    assert "postgresql://<redacted>@db:5432/mirror" in bundle_text
+
+
+def test_upgrade_guide_and_release_check_script_are_available(panel_app):
+    client, _, _, _ = panel_app
+
+    guide = client.get("/api/ops/upgrade-guide").json()
+
+    assert "CREDENTIALS_SECRET_KEY" in guide["environment_variables"]
+    assert "mirror-registry-storage:/var/lib/registry" in guide["volumes"]
+    assert "python scripts\\verify.py" in guide["commands"]
+    release_script = (Path(__file__).resolve().parents[1] / "scripts" / "release-check.ps1").read_text(encoding="utf-8")
+    for snippet in ["Version", "ImageTag", "SmokeResultPath", "CHANGELOG.md", "latest", "Release checklist failed"]:
+        assert snippet in release_script

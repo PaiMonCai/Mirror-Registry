@@ -95,6 +95,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 
 The full smoke checks Docker Compose config, panel login, Bearer token automation access, Registry `/v2/`, diagnostics API, and read-only backup/restore readiness. With `-StartServices` and without `-SkipSync`, it also triggers mirror sync and verifies `library/busybox:latest` in the local Registry when the default busybox mirror is configured. If the admin account was initialized earlier with a different password, pass `-AdminUsername` and `-AdminPassword`.
 
+### Operations Summary and Release Checks
+
+The dashboard loads `/api/ops/summary` to show health, recent sync failures, disk state, deletion marks, and the running version in one place. Common auth, TLS, network, DNS, manifest, disk, and `skopeo` errors are mapped to readable reasons and suggestions while the original task error remains available in run details.
+
+For troubleshooting handoff, export a diagnostic bundle from the dashboard or call `/api/ops/diagnostic-bundle`. The bundle includes version, config summary, diagnostics, recent runs, recent failures, and events, while redacting password, token, session cookie, authfile, Authorization, and encrypted credential fields. The upgrade guide is available at `/api/ops/upgrade-guide` and covers environment variables, volumes, backups, and compatibility checks.
+
+Before a release, run the local release checklist to block missing version numbers, image tags, version notes, README files, or smoke results:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1.0.0 -ImageTag v1.0.0 -SmokeResultPath .\smoke-result.txt
+```
+
+`ImageTag` cannot be `latest` unless `-AllowLatest` is explicit. Use `-SkipBuildChecks` only when you need a partial checklist; run the full checklist before publishing.
+
 ## Frontend Engineering and Registry Credentials
 
 - The panel frontend is built with React + Vite + TypeScript, and FastAPI continues to serve the built static files.
