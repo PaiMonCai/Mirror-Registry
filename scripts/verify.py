@@ -19,10 +19,28 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def compose_service_names(compose: str) -> set[str]:
+    names: set[str] = set()
+    in_services = False
+    for line in compose.splitlines():
+        if line == "services:":
+            in_services = True
+            continue
+        if not in_services:
+            continue
+        if line and not line.startswith(" "):
+            break
+        match = re.match(r"^  ([a-zA-Z0-9_-]+):$", line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
 def require_paths() -> None:
     required = [
         "README.md",
         "README.en.md",
+        ".dockerignore",
         ".env.example",
         ".github/workflows/dev-images.yml",
         ".github/workflows/release-images.yml",
@@ -36,7 +54,9 @@ def require_paths() -> None:
         "panel/__init__.py",
         "panel/.dockerignore",
         "panel/Dockerfile",
+        "panel/app.py",
         "panel/main.py",
+        "panel/schemas.py",
         "package.json",
         "package-lock.json",
         "panel/package.json",
@@ -54,7 +74,10 @@ def require_paths() -> None:
         "sync/.dockerignore",
         "sync/Dockerfile",
         "sync/requirements.txt",
+        "sync/worker.py",
         "sync/sync.py",
+        "mirror_registry_core/__init__.py",
+        "mirror_registry_core/config.py",
         "scripts/check-runtime.ps1",
         "scripts/build-dev-images.ps1",
         "tests/test_panel.py",
@@ -81,7 +104,7 @@ def require_no_flattened_prototype_files() -> None:
 
 
 def require_python_compiles() -> None:
-    paths = [ROOT / "panel", ROOT / "sync", ROOT / "tests", ROOT / "scripts"]
+    paths = [ROOT / "panel", ROOT / "sync", ROOT / "mirror_registry_core", ROOT / "tests", ROOT / "scripts"]
     if not compileall.compile_dir(str(ROOT / "panel"), quiet=1):
         fail("panel Python files do not compile")
     for path in paths[1:]:
@@ -94,11 +117,17 @@ def require_compose_shape() -> None:
     compose = read("docker-compose.yml")
     required_snippets = [
         "image: registry:2",
+        "REGISTRY_STORAGE_DELETE_ENABLED: \"true\"",
+        "REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry",
         'image: "ghcr.io/paimoncai/mirror-registry-panel:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"',
         'image: "ghcr.io/paimoncai/mirror-registry-sync:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"',
-        "./config/registry-config.yml:/etc/docker/registry/config.yml",
-        "./config:/config",
-        "./data:/data",
+        "mirror-registry-config:/config",
+        "mirror-registry-data:/data",
+        "mirror-registry-storage:/var/lib/registry",
+        "mirror-registry-storage:/data/registry:ro",
+        "name: mirror-registry-config",
+        "name: mirror-registry-data",
+        "name: mirror-registry-storage",
         "APP_VERSION: v4",
         "DATABASE_URL: ${DATABASE_URL:-sqlite:////data/mirror-registry.db}",
         "MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}",
@@ -116,23 +145,25 @@ def require_compose_shape() -> None:
     missing = [snippet for snippet in required_snippets if snippet not in compose]
     if missing:
         fail(f"docker-compose.yml missing snippets: {missing}")
-    forbidden_snippets = ["build: ./panel", "build: ./sync", "pull_policy: always", "/var/run/docker.sock"]
+    forbidden_snippets = ["build: ./panel", "build: ./sync", "pull_policy: always", "/var/run/docker.sock", "./config", "./data"]
     forbidden = [snippet for snippet in forbidden_snippets if snippet in compose]
     if forbidden:
         fail(f"production docker-compose.yml must pull images, not build locally: {forbidden}")
-    service_names = set(re.findall(r"^  ([a-zA-Z0-9_-]+):$", compose, flags=re.MULTILINE))
+    service_names = compose_service_names(compose)
     if service_names != {"registry", "panel", "sync"}:
         fail(f"docker-compose.yml service set is wrong: {sorted(service_names)}")
     if "    ports:\n      - \"5000:5000\"" not in compose:
         fail("registry port 5000 mapping missing")
     if "    ports:\n      - \"8080:8080\"" not in compose:
         fail("panel port 8080 mapping missing")
+    if "volumes:\n  mirror-registry-config:\n    name: mirror-registry-config\n  mirror-registry-data:\n    name: mirror-registry-data\n  mirror-registry-storage:\n    name: mirror-registry-storage" not in compose:
+        fail("production docker-compose.yml must declare named volumes")
 
     dev_compose = read("docker-compose.dev.yml")
     dev_required_snippets = [
         "image: registry:2",
-        "build: ./panel",
-        "build: ./sync",
+        "dockerfile: panel/Dockerfile",
+        "dockerfile: sync/Dockerfile",
         "./config/registry-config.yml:/etc/docker/registry/config.yml",
         "./config:/config",
         "./data:/data",
@@ -153,7 +184,7 @@ def require_compose_shape() -> None:
     missing_dev = [snippet for snippet in dev_required_snippets if snippet not in dev_compose]
     if missing_dev:
         fail(f"docker-compose.dev.yml missing snippets: {missing_dev}")
-    dev_service_names = set(re.findall(r"^  ([a-zA-Z0-9_-]+):$", dev_compose, flags=re.MULTILINE))
+    dev_service_names = compose_service_names(dev_compose)
     if dev_service_names != {"registry", "panel", "sync"}:
         fail(f"docker-compose.dev.yml service set is wrong: {sorted(dev_service_names)}")
     ok("compose files separate production image pulls from local development builds")
@@ -162,17 +193,18 @@ def require_compose_shape() -> None:
 def require_dockerfile_contexts() -> None:
     checks = {
         "panel": {
-            "required": ["requirements.txt", "main.py", "package.json", "frontend/index.html", "frontend/src/main.tsx"],
+            "required": ["requirements.txt", "app.py", "main.py", "schemas.py", "package.json", "frontend/index.html", "frontend/src/main.tsx"],
             "dockerfile_snippets": [
                 "FROM node:24-slim AS frontend",
                 "RUN npm ci",
-                "COPY frontend/ frontend/",
+                "COPY panel/frontend/ frontend/",
                 "RUN npm run build",
                 "FROM python:3.12-slim",
-                "COPY requirements.txt .",
-                "COPY main.py .",
-                "COPY --from=frontend /panel/static/ static/",
-                'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]',
+                "COPY panel/requirements.txt panel/requirements.txt",
+                "COPY mirror_registry_core/ mirror_registry_core/",
+                "COPY panel/*.py panel/",
+                "COPY --from=frontend /panel/static/ panel/static/",
+                'CMD ["uvicorn", "panel.main:app", "--host", "0.0.0.0", "--port", "8080"]',
             ],
             "requirements": [
                 "fastapi==0.111.0",
@@ -186,13 +218,14 @@ def require_dockerfile_contexts() -> None:
             ],
         },
         "sync": {
-            "required": ["requirements.txt", "sync.py"],
+            "required": ["requirements.txt", "worker.py", "sync.py"],
             "dockerfile_snippets": [
                 "FROM python:3.12-slim",
                 "apt-get install -y --no-install-recommends ca-certificates skopeo",
-                "COPY requirements.txt .",
-                "COPY sync.py .",
-                'CMD ["python", "sync.py"]',
+                "COPY sync/requirements.txt sync/requirements.txt",
+                "COPY mirror_registry_core/ mirror_registry_core/",
+                "COPY sync/*.py sync/",
+                'CMD ["python", "-m", "sync.sync"]',
             ],
             "requirements": [
                 "apscheduler==3.10.4",
@@ -253,7 +286,7 @@ def require_config_shape() -> None:
 
 
 def require_panel_features() -> None:
-    source = read("panel/main.py")
+    source = read("panel/app.py")
     tree = ast.parse(source)
     function_names = {
         node.name
@@ -308,10 +341,11 @@ def require_panel_features() -> None:
         "queue_storage_stats_recalculate",
     ]:
         if name not in function_names:
-            fail(f"panel/main.py missing function {name}")
+            fail(f"panel/app.py missing function {name}")
 
     required_snippets = [
         "PANEL_TOKEN",
+        "from mirror_registry_core.config import default_config",
         "Depends(require_write_token)",
         "DATABASE_URL",
         "APP_VERSION",
@@ -369,12 +403,12 @@ def require_panel_features() -> None:
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
-        fail(f"panel/main.py missing security/reliability snippets: {missing}")
+        fail(f"panel/app.py missing security/reliability snippets: {missing}")
     ok("panel backend has v1 security and reliability boundaries")
 
 
 def require_sync_features() -> None:
-    source = read("sync/sync.py")
+    source = read("sync/worker.py")
     tree = ast.parse(source)
     function_names = {
         node.name
@@ -413,10 +447,11 @@ def require_sync_features() -> None:
         "check_scheduled_policies",
     ]:
         if name not in function_names:
-            fail(f"sync/sync.py missing function {name}")
+            fail(f"sync/worker.py missing function {name}")
 
     required_snippets = [
         "COMMAND_TIMEOUT_SECONDS",
+        "from mirror_registry_core.config import default_config",
         "DATABASE_URL",
         "SYNC_ENGINE",
         "APP_VERSION",
@@ -460,11 +495,11 @@ def require_sync_features() -> None:
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
-        fail(f"sync/sync.py missing reliability snippets: {missing}")
+        fail(f"sync/worker.py missing reliability snippets: {missing}")
     forbidden = ["docker pull", "docker tag", "docker push", "docker rmi"]
     bad = [snippet for snippet in forbidden if snippet in source]
     if bad:
-        fail(f"sync/sync.py must use skopeo copy instead of Docker CLI: {bad}")
+        fail(f"sync/worker.py must use skopeo copy instead of Docker CLI: {bad}")
     ok("sync service has v2 skopeo copy, SQLite run history, timeout, and anti-reentry")
 
 
@@ -689,6 +724,10 @@ def require_release_workflow() -> None:
         "docker/login-action@v3",
         "docker/metadata-action@v5",
         "docker/build-push-action@v6",
+        "context: .",
+        "file: ${{ matrix.dockerfile }}",
+        "dockerfile: panel/Dockerfile",
+        "dockerfile: sync/Dockerfile",
         "mirror-registry-panel",
         "mirror-registry-sync",
         "platforms: linux/amd64",
@@ -716,6 +755,10 @@ def require_dev_workflow() -> None:
         "IMAGE_NAMESPACE: paimoncai",
         "docker/login-action@v3",
         "docker/build-push-action@v6",
+        "context: .",
+        "file: ${{ matrix.dockerfile }}",
+        "dockerfile: panel/Dockerfile",
+        "dockerfile: sync/Dockerfile",
         "mirror-registry-panel",
         "mirror-registry-sync",
         "platforms: linux/amd64",

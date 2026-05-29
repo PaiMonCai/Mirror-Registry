@@ -10,12 +10,20 @@ Single-node private Docker registry with a lightweight management panel and sche
 - `panel`: FastAPI API plus the static web panel on port `8080`.
 - `sync`: Python worker that checks upstream image digests and mirrors changed images into the local registry with `skopeo copy`.
 
+## Project Layout
+
+- `panel/main.py`: FastAPI ASGI compatibility entrypoint delegated to `panel/app.py`.
+- `panel/app.py`: panel API, route registration, and backend orchestration.
+- `panel/schemas.py`: panel request models and field constraints.
+- `sync/sync.py`: sync worker compatibility entrypoint delegated to `sync/worker.py`.
+- `sync/worker.py`: scheduler, trigger polling, and `skopeo` sync execution.
+- `mirror_registry_core/`: shared defaults and common capabilities used by panel and sync.
+
 ## Production Deployment
 
-Production servers do not build the `panel` or `sync` images locally. They pull published images from GHCR:
+Production servers do not build the `panel` or `sync` images locally. They pull published images from GHCR. The deployment directory only needs `docker-compose.yml` and `.env`; runtime data is stored in Docker named volumes:
 
 ```powershell
-Copy-Item .env.example .env
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -24,6 +32,14 @@ docker compose ps
 You can also run the update as one command: `docker compose pull && docker compose up -d`.
 
 Open `http://localhost:8080`.
+
+Production Compose no longer depends on project-side `config/` or `data/` folders:
+
+- `mirror-registry-config`: stores the panel-generated `mirrors.yml`.
+- `mirror-registry-data`: stores SQLite, logs, trigger files, and sync state.
+- `mirror-registry-storage`: stores Registry image layers and is mounted read-only into the panel for storage statistics.
+
+On first startup, the panel initializes default `busybox` mirror configuration in the config volume.
 
 The default write API token is `change-me`. Set a real token in `.env` before exposing the panel:
 
@@ -39,7 +55,7 @@ DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
-CREDENTIALS_SECRET_KEY=
+CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` defaults to `latest`. To pin a release, set it to a specific tag:
@@ -122,7 +138,7 @@ docker compose -f docker-compose.dev.yml ps
 
 ## Configuration
 
-Edit `config/mirrors.yml` or use the panel:
+For production, maintain mirror configuration through the panel; first startup creates a default config automatically. For local development, you can still edit `config/mirrors.yml` directly:
 
 ```yaml
 mirrors:

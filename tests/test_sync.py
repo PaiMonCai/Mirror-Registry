@@ -59,6 +59,22 @@ def test_valid_mirrors_skips_bad_entries(tmp_path, monkeypatch):
     ]
 
 
+def test_missing_sync_config_uses_default_busybox(tmp_path, monkeypatch):
+    config_path = tmp_path / "config" / "mirrors.yml"
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    config = sync_main.load_config()
+
+    assert config["mirrors"][0]["source"] == "docker.io/library/busybox:latest"
+    assert config["settings"]["registry_url"] == "http://registry:5000"
+    assert not config_path.exists()
+
+
 def test_valid_mirrors_keeps_v4_group_metadata(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")

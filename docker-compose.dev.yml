@@ -9,7 +9,9 @@ services:
       - ./config/registry-config.yml:/etc/docker/registry/config.yml
 
   panel:
-    build: ./panel
+    build:
+      context: .
+      dockerfile: panel/Dockerfile
     restart: unless-stopped
     environment:
       CONFIG_PATH: /config/mirrors.yml
@@ -32,7 +34,9 @@ services:
       - registry
 
   sync:
-    build: ./sync
+    build:
+      context: .
+      dockerfile: sync/Dockerfile
     restart: unless-stopped
     environment:
       CONFIG_PATH: /config/mirrors.yml

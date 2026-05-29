@@ -10,7 +10,12 @@ def panel_app(tmp_path, monkeypatch):
     return make_panel_client(tmp_path, monkeypatch)
 
 
-def make_panel_client(tmp_path, monkeypatch, credentials_secret_key: str | None = "unit-secret-key"):
+def make_panel_client(
+    tmp_path,
+    monkeypatch,
+    credentials_secret_key: str | None = "unit-secret-key",
+    seed_config: bool = True,
+):
     config_path = tmp_path / "config" / "mirrors.yml"
     state_path = tmp_path / "data" / "sync-state.json"
     log_path = tmp_path / "data" / "sync.log"
@@ -24,10 +29,11 @@ def make_panel_client(tmp_path, monkeypatch, credentials_secret_key: str | None 
     (static_dir / "index.html").write_text("<!doctype html><title>test</title>", encoding="utf-8")
     config_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        "mirrors: []\nsettings:\n  check_interval_minutes: 30\n",
-        encoding="utf-8",
-    )
+    if seed_config:
+        config_path.write_text(
+            "mirrors: []\nsettings:\n  check_interval_minutes: 30\n",
+            encoding="utf-8",
+        )
 
     monkeypatch.setenv("CONFIG_PATH", str(config_path))
     monkeypatch.setenv("STATE_PATH", str(state_path))
@@ -72,6 +78,30 @@ def test_status_and_mirror_crud(panel_app):
 
     assert client.delete("/api/mirrors/0", headers=headers).status_code == 200
     assert client.get("/api/status").json()["total"] == 0
+
+
+def test_missing_config_file_bootstraps_default_config(tmp_path, monkeypatch):
+    client, config_path, _, _ = make_panel_client(tmp_path, monkeypatch)
+    config_path.unlink()
+
+    response = client.get("/api/status")
+
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    content = config_path.read_text(encoding="utf-8")
+    assert "docker.io/library/busybox:latest" in content
+    assert "registry_url: http://registry:5000" in content
+
+
+def test_startup_bootstraps_default_config(tmp_path, monkeypatch):
+    client, config_path, _, _ = make_panel_client(tmp_path, monkeypatch, seed_config=False)
+
+    with client:
+        assert config_path.exists()
+        content = config_path.read_text(encoding="utf-8")
+
+    assert "docker.io/library/busybox:latest" in content
+    assert "registry_url: http://registry:5000" in content
 
 
 def test_write_routes_require_token(panel_app):

@@ -4,9 +4,12 @@ services:
     restart: unless-stopped
     ports:
       - "5000:5000"
+    environment:
+      REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY: /var/lib/registry
+      REGISTRY_STORAGE_DELETE_ENABLED: "true"
+      REGISTRY_HTTP_ADDR: :5000
     volumes:
-      - ./data/registry:/var/lib/registry
-      - ./config/registry-config.yml:/etc/docker/registry/config.yml
+      - mirror-registry-storage:/var/lib/registry
 
   panel:
     image: "ghcr.io/paimoncai/mirror-registry-panel:${MIRROR_REGISTRY_IMAGE_TAG:-latest}"
@@ -26,8 +29,9 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./config:/config          # mirrors.yml（读写）
-      - ./data:/data              # sync-state.json + sync.log + .trigger
+      - mirror-registry-config:/config
+      - mirror-registry-data:/data
+      - mirror-registry-storage:/data/registry:ro
     depends_on:
       - registry
 
@@ -54,7 +58,15 @@ services:
       COMMAND_TIMEOUT_SECONDS: 900
       CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
     volumes:
-      - ./config:/config:ro       # mirrors.yml（只读）
-      - ./data:/data              # sync-state.json + sync.log + .trigger
+      - mirror-registry-config:/config:ro
+      - mirror-registry-data:/data
     depends_on:
       - registry
+
+volumes:
+  mirror-registry-config:
+    name: mirror-registry-config
+  mirror-registry-data:
+    name: mirror-registry-data
+  mirror-registry-storage:
+    name: mirror-registry-storage

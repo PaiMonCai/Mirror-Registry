@@ -22,10 +22,10 @@ jobs:
       matrix:
         include:
           - service: panel
-            context: ./panel
+            dockerfile: panel/Dockerfile
             image: mirror-registry-panel
           - service: sync
-            context: ./sync
+            dockerfile: sync/Dockerfile
             image: mirror-registry-sync
 
     steps:
@@ -57,7 +57,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: ${{ matrix.context }}
+          context: .
+          file: ${{ matrix.dockerfile }}
           platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

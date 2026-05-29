@@ -1,0 +1,39 @@
+def default_config() -> dict:
+    return {
+        "registries": [
+            {
+                "id": "local",
+                "name": "Local Registry",
+                "url": "http://registry:5000",
+                "copy_host": "registry:5000",
+            }
+        ],
+        "mirror_groups": [
+            {
+                "id": "default",
+                "name": "Default",
+                "project": "default",
+                "environment": "local",
+                "namespace": "library",
+                "registry": "local",
+            }
+        ],
+        "mirrors": [
+            {
+                "source": "docker.io/library/busybox:latest",
+                "target": "localhost:5000/library/busybox:latest",
+                "registry": "local",
+                "group": "default",
+                "project": "default",
+                "environment": "local",
+                "namespace": "library",
+            }
+        ],
+        "settings": {
+            "check_interval_minutes": 30,
+            "registry_url": "http://registry:5000",
+            "database_url": "sqlite:////data/mirror-registry.db",
+            "sync_concurrency": 2,
+            "sync_retry_count": 2,
+        },
+    }

@@ -2,20 +2,21 @@ FROM node:24-slim AS frontend
 
 WORKDIR /panel
 
-COPY package.json package-lock.json ./
+COPY panel/package.json panel/package-lock.json ./
 RUN npm ci
 
-COPY frontend/ frontend/
+COPY panel/frontend/ frontend/
 RUN npm run build
 
 FROM python:3.12-slim
 
-WORKDIR /panel
+WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY panel/requirements.txt panel/requirements.txt
+RUN pip install --no-cache-dir -r panel/requirements.txt
 
-COPY main.py .
-COPY --from=frontend /panel/static/ static/
+COPY mirror_registry_core/ mirror_registry_core/
+COPY panel/*.py panel/
+COPY --from=frontend /panel/static/ panel/static/
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "panel.main:app", "--host", "0.0.0.0", "--port", "8080"]

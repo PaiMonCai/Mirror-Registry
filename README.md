@@ -10,12 +10,20 @@
 - `panel`：FastAPI 后端和静态管理面板，默认监听 `8080` 端口。
 - `sync`：Python 同步任务，定时检查上游镜像 digest，发现变化后用 `skopeo copy` 同步到本地 Registry。
 
+## 项目结构
+
+- `panel/main.py`：FastAPI ASGI 兼容入口，实际实现委托给 `panel/app.py`。
+- `panel/app.py`：管理面板 API、路由注册和后端业务编排。
+- `panel/schemas.py`：面板请求模型和字段约束。
+- `sync/sync.py`：同步 worker 兼容入口，实际实现委托给 `sync/worker.py`。
+- `sync/worker.py`：定时调度、触发器轮询和 `skopeo` 同步执行逻辑。
+- `mirror_registry_core/`：panel 和 sync 共享的默认配置等公共能力。
+
 ## 生产部署
 
-生产服务器直接拉取已发布镜像，不在服务器上构建项目：
+生产服务器直接拉取已发布镜像，不在服务器上构建项目。部署目录只需要 `docker-compose.yml` 和 `.env`，运行数据由 Docker named volumes 保存：
 
 ```powershell
-Copy-Item .env.example .env
 docker compose pull
 docker compose up -d
 docker compose ps
@@ -24,6 +32,14 @@ docker compose ps
 也可以把更新命令合并为一行执行：`docker compose pull && docker compose up -d`。
 
 启动后打开 `http://localhost:8080`。
+
+生产 compose 不再依赖项目内的 `config/` 和 `data/` 文件夹：
+
+- `mirror-registry-config`：保存面板生成的 `mirrors.yml`。
+- `mirror-registry-data`：保存 SQLite、日志、触发文件和同步状态。
+- `mirror-registry-storage`：保存 Registry 镜像层数据，并只读挂载给面板做存储统计。
+
+首次启动时，面板会在配置卷中自动初始化默认 `busybox` 镜像配置。
 
 默认写入接口令牌是 `change-me`。如果要暴露管理面板，先在 `.env` 中设置强随机令牌：
 
@@ -39,7 +55,7 @@ DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
-CREDENTIALS_SECRET_KEY=
+CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` 默认是 `latest`。如果要锁定正式版本，可以改成指定 tag：
@@ -122,7 +138,7 @@ docker compose -f docker-compose.dev.yml ps
 
 ## 镜像同步配置
 
-可以直接编辑 `config/mirrors.yml`，也可以在管理面板中维护：
+生产部署建议在管理面板中维护镜像配置；首次启动会自动生成默认配置。本地开发时也可以直接编辑 `config/mirrors.yml`：
 
 ```yaml
 mirrors:
