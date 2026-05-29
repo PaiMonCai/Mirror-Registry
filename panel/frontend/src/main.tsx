@@ -45,6 +45,7 @@ type View =
   | 'diagnostics'
   | 'logs'
   | 'audit'
+  | 'access'
   | 'security'
   | 'settings';
 
@@ -62,6 +63,7 @@ const viewMeta: Record<View, { title: string; subtitle: string; icon: React.Reac
   diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <ListChecks size={18} /> },
   logs: { title: '日志 / 事件', subtitle: '同步日志和结构化事件。', icon: <Activity size={18} /> },
   audit: { title: '审计', subtitle: '面板和同步服务的操作记录。', icon: <ShieldCheck size={18} /> },
+  access: { title: '访问控制', subtitle: '管理本地用户角色和可撤销 API Token。', icon: <LockKeyhole size={18} /> },
   security: { title: '安全', subtitle: '公网暴露边界和反向代理建议。', icon: <FileKey2 size={18} /> },
   settings: { title: '设置', subtitle: '同步间隔、并发、重试、通知和数据库配置。', icon: <Settings size={18} /> },
 };
@@ -114,6 +116,7 @@ function App() {
   const [logs, setLogs] = useState('');
   const [events, setEvents] = useState<AnyRecord[]>([]);
   const [audit, setAudit] = useState<AnyRecord[]>([]);
+  const [access, setAccess] = useState<AnyRecord>({ users: [], tokens: [] });
   const [security, setSecurity] = useState<AnyRecord>({});
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<AnyRecord[]>([]);
@@ -206,6 +209,14 @@ function App() {
     setAudit(await api('GET', '/audit-logs?limit=100'));
   }
 
+  async function loadAccess() {
+    const [users, tokens] = await Promise.all([
+      api('GET', '/access/users'),
+      api('GET', '/access/tokens'),
+    ]);
+    setAccess({ users, tokens });
+  }
+
   async function loadSecurity() {
     setSecurity(await api('GET', '/security-guide'));
   }
@@ -271,6 +282,7 @@ function App() {
       if (view === 'diagnostics') await loadDiagnostics();
       if (view === 'logs') await loadLogs();
       if (view === 'audit') await loadAudit();
+      if (view === 'access') await loadAccess();
       if (view === 'security') await loadSecurity();
       if (view === 'settings') await loadSettings();
     };
@@ -358,6 +370,7 @@ function App() {
         {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
         {view === 'audit' && <Audit rows={audit} reload={loadAudit} />}
+        {view === 'access' && <AccessControl access={access} api={api} reload={loadAccess} notify={notify} />}
         {view === 'security' && <Security guide={security} />}
         {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
       </main>
@@ -919,6 +932,52 @@ function Logs({ logs, events, reload }: any) {
 
 function Audit({ rows, reload }: any) {
   return <Panel title="审计日志" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}><table><thead><tr><th>时间</th><th>Actor</th><th>动作</th><th>资源</th><th>详情</th></tr></thead><tbody>{rows.map((row: AnyRecord) => <tr key={row.id}><td>{row.created_at}</td><td>{row.actor}</td><td>{row.action}</td><td>{row.resource_type}:{row.resource_id}</td><td><code>{JSON.stringify(row.detail)}</code></td></tr>)}</tbody></table></Panel>;
+}
+
+function AccessControl({ access, api, reload, notify }: any) {
+  const [userForm, setUserForm] = useState({ username: '', password: '', role: 'viewer' });
+  const [tokenForm, setTokenForm] = useState({ name: '', role: 'operator', scopes: 'sync' });
+  const [issuedToken, setIssuedToken] = useState('');
+  async function saveUser() {
+    await api('POST', '/access/users', { ...userForm, password: userForm.password || undefined });
+    setUserForm({ username: '', password: '', role: 'viewer' });
+    await reload();
+    notify('用户已保存');
+  }
+  async function createToken() {
+    const result = await api('POST', '/access/tokens', { ...tokenForm, scopes: tokenForm.scopes.split(',').map((item: string) => item.trim()).filter(Boolean) });
+    setIssuedToken(result.token);
+    setTokenForm({ name: '', role: 'operator', scopes: 'sync' });
+    await reload();
+    notify('API Token 已创建');
+  }
+  return (
+    <div className="stack">
+      <Panel title="本地用户">
+        <div className="form-grid">
+          <input placeholder="username" value={userForm.username} onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} />
+          <input type="password" placeholder="password（新用户必填）" value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} />
+          <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}><option value="viewer">viewer</option><option value="operator">operator</option><option value="admin">admin</option></select>
+          <button className="primary" onClick={saveUser}>保存用户</button>
+        </div>
+        <table><thead><tr><th>用户</th><th>角色</th><th>创建</th><th>更新</th><th>操作</th></tr></thead>
+          <tbody>{(access.users || []).map((user: AnyRecord) => <tr key={user.username}><td>{user.username}</td><td><Badge value={user.role} /></td><td>{user.created_at}</td><td>{user.updated_at}</td><td><button className="danger" onClick={() => api('DELETE', `/access/users/${user.username}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
+        </table>
+      </Panel>
+      <Panel title="API Token">
+        <div className="form-grid">
+          <input placeholder="名称" value={tokenForm.name} onChange={(e) => setTokenForm({ ...tokenForm, name: e.target.value })} />
+          <select value={tokenForm.role} onChange={(e) => setTokenForm({ ...tokenForm, role: e.target.value })}><option value="operator">operator</option><option value="viewer">viewer</option><option value="admin">admin</option></select>
+          <input placeholder="scopes, comma separated" value={tokenForm.scopes} onChange={(e) => setTokenForm({ ...tokenForm, scopes: e.target.value })} />
+          <button className="primary" onClick={createToken}><KeyRound size={16} />创建 Token</button>
+        </div>
+        {issuedToken && <pre>{issuedToken}</pre>}
+        <table><thead><tr><th>ID</th><th>名称</th><th>角色</th><th>Scopes</th><th>状态</th><th>最近使用</th><th>操作</th></tr></thead>
+          <tbody>{(access.tokens || []).map((token: AnyRecord) => <tr key={token.id}><td>{token.id}</td><td>{token.name}</td><td><Badge value={token.role} /></td><td>{(token.scopes || []).join(', ')}</td><td><Badge value={token.revoked ? 'revoked' : 'active'} /></td><td>{token.last_used_at || '-'}</td><td>{!token.revoked && <button onClick={() => api('POST', `/access/tokens/${token.id}/revoke`, {}).then(reload)}>撤销</button>}</td></tr>)}</tbody>
+        </table>
+      </Panel>
+    </div>
+  );
 }
 
 function Security({ guide }: any) {

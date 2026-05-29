@@ -420,6 +420,20 @@ def require_panel_features() -> None:
         "worker_heartbeat",
         "worker_claim",
         "worker_complete",
+        "normalize_role",
+        "role_allows",
+        "require_admin",
+        "list_access_users",
+        "upsert_access_user",
+        "delete_access_user",
+        "api_token_user",
+        "create_api_token",
+        "revoke_api_token",
+        "get_access_users",
+        "save_access_user",
+        "get_api_tokens",
+        "issue_api_token",
+        "revoke_access_token",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -507,6 +521,13 @@ def require_panel_features() -> None:
         "@app.post(\"/api/workers/heartbeat\"",
         "@app.post(\"/api/workers/claim\"",
         "@app.post(\"/api/workers/complete\"",
+        "api_tokens",
+        "AccessUserIn",
+        "ApiTokenIn",
+        "@app.get(\"/api/access/users\"",
+        "@app.post(\"/api/access/tokens\"",
+        "mrt_",
+        "require_admin",
         "package_manifest",
         "protected_environment",
         "release_tag",
@@ -762,6 +783,10 @@ def require_frontend_features() -> None:
         "/workers",
         "Worker 状态",
         "Worker 接入",
+        "/access/users",
+        "/access/tokens",
+        "访问控制",
+        "API Token",
         "using_default_token",
         "/ops/summary",
         "/ops/diagnostic-bundle",
@@ -837,6 +862,9 @@ def require_tests_and_docs() -> None:
         "/api/workers",
         "test_worker_heartbeat_claim_and_complete",
         "test_sync_heartbeat_registers_local_worker",
+        "/api/access/users",
+        "/api/access/tokens",
+        "test_access_users_roles_and_api_tokens",
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
@@ -934,6 +962,8 @@ def require_tests_and_docs() -> None:
         "远程 Worker",
         "WORKER_TOKEN",
         "/api/workers",
+        "轻量访问控制",
+        "/api/access/tokens",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -985,6 +1015,8 @@ def require_tests_and_docs() -> None:
         "Remote Worker",
         "WORKER_TOKEN",
         "/api/workers",
+        "Lightweight Access Control",
+        "/api/access/tokens",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")

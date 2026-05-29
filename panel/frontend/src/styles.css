@@ -119,9 +119,9 @@ h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
   border: 1px solid var(--line);
   font-size: 12px;
 }
-.badge.ok, .badge.completed, .badge.success, .badge.synced, .badge.configured, .badge.online { color: var(--accent); }
-.badge.error, .badge.failed, .badge.unauthorized, .badge.forbidden, .badge.canceled { color: var(--danger); }
-.badge.warn, .badge.pending, .badge.warning, .badge.queued, .badge.paused, .badge.cancel_requested { color: var(--warn); }
+.badge.ok, .badge.completed, .badge.success, .badge.synced, .badge.configured, .badge.online, .badge.active, .badge.admin { color: var(--accent); }
+.badge.error, .badge.failed, .badge.unauthorized, .badge.forbidden, .badge.canceled, .badge.revoked { color: var(--danger); }
+.badge.warn, .badge.pending, .badge.warning, .badge.queued, .badge.paused, .badge.cancel_requested, .badge.operator, .badge.viewer { color: var(--warn); }
 .badge.running { color: var(--accent-2); }
 .kv { display: grid; grid-template-columns: 160px 1fr; gap: 8px 14px; margin: 0; }
 .kv dt { color: var(--muted); }

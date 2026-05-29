@@ -126,6 +126,39 @@ def test_session_expiry_requires_login_again(tmp_path, monkeypatch):
     assert client.get("/api/status").status_code == 401
 
 
+def test_access_users_roles_and_api_tokens(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    created = client.post(
+        "/api/access/users",
+        json={"username": "viewer", "password": "viewer-password", "role": "viewer"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    assert any(item["username"] == "viewer" and item["role"] == "viewer" for item in client.get("/api/access/users", headers=headers).json())
+
+    viewer_client = client
+    assert viewer_client.post("/api/auth/login", json={"username": "viewer", "password": "viewer-password"}).status_code == 200
+    denied = viewer_client.post("/api/sync")
+    assert denied.status_code == 403
+    assert viewer_client.get("/api/status").status_code == 200
+
+    assert client.post("/api/auth/login", json={"username": "admin", "password": "admin-password"}).status_code == 200
+    issued = client.post(
+        "/api/access/tokens",
+        json={"name": "sync-bot", "role": "operator", "scopes": ["sync"]},
+        headers=headers,
+    ).json()
+    token = issued["token"]
+    assert token.startswith("mrt_")
+    assert token not in json.dumps(client.get("/api/access/tokens", headers=headers).json())
+    assert client.post("/api/sync", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    revoked = client.post(f"/api/access/tokens/{issued['api_token']['id']}/revoke", headers=headers).json()["api_token"]
+    assert revoked["revoked"] is True
+    assert client.post("/api/sync", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
 def test_login_audit_redacts_secret_values(tmp_path, monkeypatch):
     client, _, _, _ = make_panel_client(tmp_path, monkeypatch, login=False)
 

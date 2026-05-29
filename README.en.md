@@ -162,6 +162,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - Remote workers use the reserved `WORKER_TOKEN` least-privilege entry with `X-Worker-Token` for `/api/workers/heartbeat`, `/api/workers/claim`, and `/api/workers/complete`.
 - `WORKER_TOKEN` does not grant admin panel access; rotate it in `.env` and restart panel if it leaks.
 
+## Lightweight Access Control
+
+- The Access Control page manages local users, roles, and API Token records. Built-in roles are `admin`, `operator`, and `viewer`.
+- `viewer` can inspect status, tasks, storage, diagnostics, and audit logs. Write APIs require `operator` or `admin`; access-control management requires `admin`.
+- API Token values use the `mrt_` prefix and are stored as hashes only. The token is shown once at creation and can be revoked with `/api/access/tokens/{id}/revoke`.
+- The legacy `PANEL_TOKEN` remains for automation compatibility, but revocable API tokens are preferred.
+
 ## Image Size Statistics
 
 - The Storage page can queue manifest/blob recalculation in the background. Page requests read SQLite cache and do not perform heavy full scans.

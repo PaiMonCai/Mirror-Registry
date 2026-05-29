@@ -162,6 +162,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - 远程 worker 预留 `WORKER_TOKEN` 最小权限入口，通过 `X-Worker-Token` 调用 `/api/workers/heartbeat`、`/api/workers/claim` 和 `/api/workers/complete`。
 - `WORKER_TOKEN` 不授予管理员面板权限；泄露时应在 `.env` 中轮换并重启 panel。
 
+## 轻量访问控制
+
+- 面板「访问控制」页提供本地用户、角色和 API Token 管理；角色分为 `admin`、`operator`、`viewer`。
+- `viewer` 只能查看状态、任务、存储、诊断和审计；写操作需要 `operator` 或 `admin`，访问控制管理需要 `admin`。
+- API Token 使用 `mrt_` 前缀，只保存哈希；创建后只显示一次，可通过 `/api/access/tokens/{id}/revoke` 撤销。
+- 旧 `PANEL_TOKEN` 仍保留为自动化兼容入口，但建议迁移到可撤销 API Token。
+
 ## 镜像体积统计
 
 - 存储页支持后台重算 manifest/blob 统计，默认读取 SQLite 缓存，不在页面请求中执行重型全量扫描。

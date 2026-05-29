@@ -25,6 +25,8 @@ from fastapi.staticfiles import StaticFiles
 
 from mirror_registry_core.config import default_config
 from .schemas import (
+    AccessUserIn,
+    ApiTokenIn,
     BackupRestoreDrillIn,
     BackupRestoreVerifyIn,
     CredentialIn,
@@ -325,6 +327,18 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT NOT NULL,
     last_seen_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    role TEXT NOT NULL,
+    scopes TEXT NOT NULL,
+    expires_at TEXT,
+    revoked INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -547,6 +561,19 @@ POSTGRES_SCHEMA_STATEMENTS = [
         last_seen_at VARCHAR(64) NOT NULL
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        token_hash VARCHAR(128) NOT NULL,
+        role VARCHAR(32) NOT NULL,
+        scopes TEXT NOT NULL,
+        expires_at VARCHAR(64),
+        revoked INTEGER NOT NULL DEFAULT 0,
+        created_at VARCHAR(64) NOT NULL,
+        last_used_at VARCHAR(64)
+    )
+    """,
 ]
 
 MYSQL_SCHEMA_STATEMENTS = [
@@ -723,6 +750,20 @@ def verify_password(password: str, stored_hash: str) -> bool:
         return False
 
 
+ROLE_ORDER = {"viewer": 0, "operator": 1, "admin": 2, "automation": 2}
+
+
+def normalize_role(value: str) -> str:
+    role = (value or "viewer").strip().lower()
+    if role not in {"admin", "operator", "viewer"}:
+        raise HTTPException(400, "role 必须是 admin、operator 或 viewer")
+    return role
+
+
+def role_allows(actual: str, required: str) -> bool:
+    return ROLE_ORDER.get(actual, -1) >= ROLE_ORDER.get(required, 0)
+
+
 def admin_user_exists() -> bool:
     return bool(db_rows("SELECT username FROM users LIMIT 1"))
 
@@ -751,9 +792,131 @@ def user_row(username: str) -> dict | None:
     return db_one("SELECT username, password_hash, role, created_at, updated_at FROM users WHERE username = ?", (clean_username,))
 
 
+def public_user(row: dict) -> dict:
+    return {
+        "username": row["username"],
+        "role": row["role"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def list_access_users() -> list[dict]:
+    return [public_user(row) for row in db_rows("SELECT username, role, created_at, updated_at FROM users ORDER BY username")]
+
+
+def upsert_access_user(body: AccessUserIn) -> dict:
+    username = body.username.strip()
+    role = normalize_role(body.role)
+    existing = user_row(username)
+    now = now_iso()
+    if existing:
+        if body.password:
+            db_execute("UPDATE users SET password_hash = ?, role = ?, updated_at = ? WHERE username = ?", (password_hash(body.password), role, now, username))
+        else:
+            db_execute("UPDATE users SET role = ?, updated_at = ? WHERE username = ?", (role, now, username))
+        audit_log("update", "user", username, {"role": role}, actor="panel")
+    else:
+        if not body.password:
+            raise HTTPException(400, "创建用户必须提供 password")
+        db_execute(
+            "INSERT INTO users(username, password_hash, role, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (username, password_hash(body.password), role, now, now),
+        )
+        audit_log("create", "user", username, {"role": role}, actor="panel")
+    return public_user(user_row(username))
+
+
+def delete_access_user(username: str) -> None:
+    clean_username = username.strip()
+    if clean_username == ADMIN_USERNAME:
+        raise HTTPException(400, "不能删除环境变量初始化的默认管理员")
+    if not user_row(clean_username):
+        raise HTTPException(404, "用户不存在")
+    db_execute("DELETE FROM users WHERE username = ?", (clean_username,))
+    db_execute("DELETE FROM sessions WHERE username = ?", (clean_username,))
+    audit_log("delete", "user", clean_username, {}, actor="panel")
+
+
 def bearer_token_valid(authorization: str | None) -> bool:
     expected = f"Bearer {PANEL_TOKEN}"
     return bool(PANEL_TOKEN and authorization and hmac.compare_digest(authorization, expected))
+
+
+def hash_api_token(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def api_token_user(authorization: str | None) -> dict | None:
+    if not authorization or not authorization.startswith("Bearer mrt_"):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    token_hash = hash_api_token(token)
+    row = db_one(
+        """
+        SELECT id, name, role, scopes, expires_at, revoked
+        FROM api_tokens
+        WHERE token_hash = ?
+        """,
+        (token_hash,),
+    )
+    if not row or int(row.get("revoked") or 0):
+        return None
+    expires_at = row.get("expires_at") or ""
+    if expires_at and parse_iso(expires_at) <= datetime.now(timezone.utc):
+        return None
+    db_execute("UPDATE api_tokens SET last_used_at = ? WHERE id = ?", (now_iso(), row["id"]))
+    return {
+        "username": f"token:{row['name']}",
+        "role": row["role"],
+        "auth_method": "api_token",
+        "token_id": row["id"],
+        "scopes": parse_worker_list(row.get("scopes")),
+    }
+
+
+def public_api_token(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "role": row["role"],
+        "scopes": parse_worker_list(row.get("scopes")),
+        "expires_at": row.get("expires_at") or "",
+        "revoked": bool(row.get("revoked")),
+        "created_at": row["created_at"],
+        "last_used_at": row.get("last_used_at") or "",
+    }
+
+
+def list_api_tokens() -> list[dict]:
+    rows = db_rows("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens ORDER BY created_at DESC")
+    return [public_api_token(row) for row in rows]
+
+
+def create_api_token(body: ApiTokenIn) -> dict:
+    role = normalize_role(body.role)
+    token_id = secrets.token_hex(8)
+    token = f"mrt_{secrets.token_urlsafe(32)}"
+    now = now_iso()
+    db_execute(
+        """
+        INSERT INTO api_tokens(id, name, token_hash, role, scopes, expires_at, revoked, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+        """,
+        (token_id, body.name.strip(), hash_api_token(token), role, json.dumps(clean_worker_list(body.scopes), ensure_ascii=False), body.expires_at or None, now),
+    )
+    audit_log("create", "api_token", token_id, {"name": body.name, "role": role, "scopes": body.scopes}, actor="panel")
+    return {"token": token, "api_token": public_api_token(db_one("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens WHERE id = ?", (token_id,)))}
+
+
+def revoke_api_token(token_id: str) -> dict:
+    clean_id = validate_slug(token_id, "token_id")
+    row = db_one("SELECT id FROM api_tokens WHERE id = ?", (clean_id,))
+    if not row:
+        raise HTTPException(404, "API token 不存在")
+    db_execute("UPDATE api_tokens SET revoked = 1 WHERE id = ?", (clean_id,))
+    audit_log("revoke", "api_token", clean_id, {}, actor="panel")
+    return public_api_token(db_one("SELECT id, name, role, scopes, expires_at, revoked, created_at, last_used_at FROM api_tokens WHERE id = ?", (clean_id,)))
 
 
 def worker_token_valid(token: str | None) -> bool:
@@ -793,7 +956,10 @@ def session_user(token: str | None) -> dict | None:
     if not row:
         return None
     db_execute("UPDATE sessions SET last_seen_at = ? WHERE id = ?", (now_iso(), row["id"]))
-    return {"username": row["username"], "role": "admin", "auth_method": "session", "expires_at": row["expires_at"]}
+    user = user_row(row["username"])
+    if not user:
+        return None
+    return {"username": row["username"], "role": user["role"], "auth_method": "session", "expires_at": row["expires_at"]}
 
 
 def delete_session(token: str | None) -> None:
@@ -803,6 +969,11 @@ def delete_session(token: str | None) -> None:
 
 def authenticate_request(request: Request) -> dict | None:
     authorization = request.headers.get("authorization")
+    if authorization and authorization.startswith("Bearer mrt_"):
+        return api_token_user(authorization)
+    api_user = api_token_user(authorization)
+    if api_user:
+        return api_user
     if bearer_token_valid(authorization):
         return {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
     if request.url.path.startswith("/api/workers/") and worker_token_valid(request.headers.get("x-worker-token")):
@@ -822,12 +993,20 @@ async def require_api_auth(request: Request, call_next):
 
 
 def require_write_token(request: Request, authorization: Annotated[str | None, Header()] = None) -> None:
-    if getattr(request.state, "auth_user", None):
+    user = getattr(request.state, "auth_user", None)
+    if user and role_allows(user.get("role", ""), "operator"):
         return
     if bearer_token_valid(authorization):
         request.state.auth_user = {"username": "panel_token", "role": "automation", "auth_method": "bearer"}
         return
-    raise HTTPException(401, "写操作需要登录或有效访问令牌")
+    raise HTTPException(403, "写操作需要 operator 或 admin 权限")
+
+
+def require_admin(request: Request) -> None:
+    user = getattr(request.state, "auth_user", None)
+    if user and role_allows(user.get("role", ""), "admin"):
+        return
+    raise HTTPException(403, "该操作需要 admin 权限")
 
 
 def require_worker_token(request: Request, x_worker_token: Annotated[str | None, Header(alias="X-Worker-Token")] = None) -> None:
@@ -2929,6 +3108,37 @@ def logout(request: Request, response: Response):
     response.delete_cookie(SESSION_COOKIE_NAME, path="/", samesite="lax")
     audit_log("logout", "auth", user.get("username", "unknown"), {"method": user.get("auth_method", "unknown")}, actor=user.get("username", "unknown"))
     return {"ok": True}
+
+
+@app.get("/api/access/users", dependencies=[Depends(require_admin)])
+def get_access_users():
+    return list_access_users()
+
+
+@app.post("/api/access/users", dependencies=[Depends(require_admin)])
+def save_access_user(body: AccessUserIn):
+    return {"ok": True, "user": upsert_access_user(body)}
+
+
+@app.delete("/api/access/users/{username}", dependencies=[Depends(require_admin)])
+def remove_access_user(username: str):
+    delete_access_user(username)
+    return {"ok": True}
+
+
+@app.get("/api/access/tokens", dependencies=[Depends(require_admin)])
+def get_api_tokens():
+    return list_api_tokens()
+
+
+@app.post("/api/access/tokens", dependencies=[Depends(require_admin)])
+def issue_api_token(body: ApiTokenIn):
+    return {"ok": True, **create_api_token(body)}
+
+
+@app.post("/api/access/tokens/{token_id}/revoke", dependencies=[Depends(require_admin)])
+def revoke_access_token(token_id: str):
+    return {"ok": True, "api_token": revoke_api_token(token_id)}
 
 
 @app.get("/api/status")
