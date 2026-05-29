@@ -892,6 +892,17 @@ def test_backup_restore_guide_and_verify(panel_app):
     assert not trigger_path.exists()
     assert any(item["action"] == "drill" and item["resource_type"] == "backup_restore" for item in client.get("/api/audit-logs").json())
 
+    migration_plan = client.get("/api/migration/plan").json()
+    assert "scripts\\migration-report.ps1" in migration_plan["commands"]["source_report"]
+    assert migration_plan["manifest"]["queue"]["active"] == 0
+    migration_manifest = client.get("/api/migration/package-manifest").json()
+    assert any(item["name"] == "config_file" and item["sha256"] for item in migration_manifest["required_items"])
+    migration = client.post("/api/migration/preflight", json={}, headers=headers).json()
+    assert migration["readonly"] is True
+    assert any(item["name"] == "同步队列" for item in migration["checks"])
+    assert "unit-secret-key" not in json.dumps(migration, ensure_ascii=False)
+    assert any(item["action"] == "preflight" and item["resource_type"] == "migration" for item in client.get("/api/audit-logs").json())
+
 
 def test_schedules_default_disabled_and_trigger_policy_run(panel_app):
     client, _, _, trigger_path = panel_app

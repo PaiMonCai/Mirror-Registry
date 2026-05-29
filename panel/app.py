@@ -3989,6 +3989,61 @@ def backup_path_item(name: str, path: Path, required: bool = True, secret: bool 
     }
 
 
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def directory_inventory(path: Path, include_checksums: bool = False, max_checksum_files: int = 5000) -> dict:
+    result = {
+        "path": str(path),
+        "exists": path.exists(),
+        "kind": "directory",
+        "file_count": 0,
+        "size_bytes": 0,
+        "sha256": "",
+        "checksum_warning": "",
+    }
+    if not path.exists() or not path.is_dir():
+        return result
+    files = [item for item in path.rglob("*") if item.is_file()]
+    result["file_count"] = len(files)
+    total_size = 0
+    for item in files:
+        try:
+            total_size += item.stat().st_size
+        except OSError:
+            continue
+    result["size_bytes"] = total_size
+    if include_checksums:
+        if len(files) > max_checksum_files:
+            result["checksum_warning"] = f"文件数超过 {max_checksum_files}，请使用 scripts\\migration-report.ps1 生成离线校验清单"
+        else:
+            aggregate = hashlib.sha256()
+            for item in sorted(files):
+                rel = item.relative_to(path).as_posix()
+                aggregate.update(rel.encode("utf-8"))
+                aggregate.update(b"\0")
+                aggregate.update(file_sha256(item).encode("ascii"))
+                aggregate.update(b"\0")
+            result["sha256"] = aggregate.hexdigest()
+    return result
+
+
+def migration_manifest_item(name: str, path: Path, required: bool = True, secret: bool = False) -> dict:
+    item = backup_path_item(name, path, required=required, secret=secret)
+    item["sha256"] = ""
+    if path.exists() and path.is_file() and not secret:
+        try:
+            item["sha256"] = file_sha256(path)
+        except OSError:
+            item["sha256"] = ""
+    return item
+
+
 def build_backup_package_manifest() -> dict:
     registry_root = REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2"
     return {
@@ -4015,6 +4070,116 @@ def build_backup_package_manifest() -> dict:
             "备份包不得导出明文仓库凭据；凭据恢复依赖原始 CREDENTIALS_SECRET_KEY。",
             "恢复演练默认只读，不启动 sync，不创建同步触发文件。",
         ],
+    }
+
+
+def build_migration_package_manifest(include_registry_checksums: bool = False) -> dict:
+    env_path = Path(".env")
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "readonly": True,
+        "source": {
+            "app_version": APP_VERSION,
+            "image_tag": IMAGE_TAG,
+            "database_backend": database_backend(DATABASE_URL),
+        },
+        "required_items": [
+            migration_manifest_item("config_file", CONFIG_PATH),
+            migration_manifest_item("config_dir", CONFIG_PATH.parent),
+            migration_manifest_item("database", DB_PATH),
+            migration_manifest_item("env_file", env_path, secret=True),
+            {"name": "credentials_secret", "path": "CREDENTIALS_SECRET_KEY", "required": True, "exists": bool(CREDENTIALS_SECRET_KEY.strip()), "kind": "environment", "size_bytes": None, "secret": True, "sha256": ""},
+            {**directory_inventory(REGISTRY_STORAGE_PATH, include_checksums=include_registry_checksums), "name": "registry_storage", "required": True, "secret": False},
+        ],
+        "queue": {
+            "active": queue_count_by_status(["queued", "running", "paused", "cancel_requested"]),
+            "terminal": queue_count_by_status(["completed", "failed", "canceled"]),
+        },
+        "commands": {
+            "manifest": "powershell -ExecutionPolicy Bypass -File .\\scripts\\migration-report.ps1",
+            "backup": "Compress-Archive -Path config,data\\registry,data\\mirror-registry.db,.env -DestinationPath mirror-registry-backup.zip -Force",
+            "restore_drill": "powershell -ExecutionPolicy Bypass -File .\\scripts\\restore-drill.ps1",
+        },
+    }
+
+
+def migration_check(name: str, status: str, message: str, suggestion: str = "", details: dict | None = None) -> dict:
+    return drill_check(name, status, message, suggestion, details)
+
+
+def queue_count_by_status(statuses: list[str]) -> int:
+    if not statuses:
+        return 0
+    placeholders = ",".join("?" for _ in statuses)
+    row = db_one(f"SELECT COUNT(*) AS count FROM sync_queue WHERE status IN ({placeholders})", tuple(statuses))
+    return int(row.get("count") or 0) if row else 0
+
+
+def build_migration_preflight() -> dict:
+    checks: list[dict] = []
+    docker_path = shutil.which("docker")
+    checks.append(migration_check("Docker CLI", "ok" if docker_path else "warn", f"docker: {docker_path}" if docker_path else "当前环境未发现 docker 命令", "目标机器恢复前需要 Docker 和 Compose"))
+
+    for name, path in [("配置文件", CONFIG_PATH), ("SQLite 数据库", DB_PATH), ("Registry 数据", REGISTRY_STORAGE_PATH)]:
+        checks.append(migration_check(name, "ok" if path.exists() else "error", f"{path} {'存在' if path.exists() else '缺失'}", "迁移包必须包含该项", {"path": str(path)}))
+
+    try:
+        base_path = REGISTRY_STORAGE_PATH if REGISTRY_STORAGE_PATH.exists() else DB_PATH.parent
+        usage = shutil.disk_usage(base_path)
+        inventory = directory_inventory(REGISTRY_STORAGE_PATH)
+        estimated = int(inventory.get("size_bytes") or 0) + (DB_PATH.stat().st_size if DB_PATH.exists() else 0)
+        status = "ok" if usage.free > estimated else "warn"
+        checks.append(migration_check("磁盘空间", status, f"当前可用 {usage.free} bytes，备份估算 {estimated} bytes", "目标机器可用空间应大于 registry 数据和数据库体积", {"free_bytes": usage.free, "estimated_backup_bytes": estimated}))
+    except OSError as exc:
+        checks.append(migration_check("磁盘空间", "warn", f"无法读取磁盘空间: {exc}", "在目标机器上运行 scripts\\migration-report.ps1 复核"))
+
+    if CREDENTIALS_SECRET_KEY.strip():
+        checks.append(migration_check("凭据主密钥", "ok", "CREDENTIALS_SECRET_KEY 已配置且未输出内容"))
+    else:
+        checks.append(migration_check("凭据主密钥", "error", "缺少 CREDENTIALS_SECRET_KEY", "恢复含加密凭据的数据前必须使用原始主密钥"))
+
+    active_queue = queue_count_by_status(["queued", "running", "paused", "cancel_requested"])
+    checks.append(migration_check("同步队列", "ok" if active_queue == 0 else "warn", f"活动队列任务 {active_queue} 个", "迁移前建议等待队列清空或显式取消/重放", {"active": active_queue}))
+    checks.append(migration_check("只读边界", "ok" if not TRIGGER_PATH.exists() else "warn", "未发现同步触发文件" if not TRIGGER_PATH.exists() else "存在同步触发文件", "迁移前确认不会自动触发 sync"))
+
+    summary = summarize_drill_checks(checks)
+    return {
+        "ok": summary["error"] == 0,
+        "readonly": True,
+        "checked_at": now_iso(),
+        "summary": summary,
+        "checks": checks,
+        "manifest": build_migration_package_manifest(),
+    }
+
+
+def build_migration_restore_plan() -> dict:
+    return {
+        "title": "Mirror Registry migration and restore plan",
+        "readonly": True,
+        "preflight": [
+            "在源机器运行 /api/migration/preflight 或 scripts\\migration-report.ps1，确认配置、SQLite、Registry 数据和密钥完整。",
+            "等待 /api/sync-queue 没有 queued/running/paused/cancel_requested 任务，或先取消并记录可重放任务。",
+            "停止 registry 后打包 config、data\\registry、data\\mirror-registry.db 和 .env。",
+        ],
+        "restore_steps": [
+            "在目标机器安装 Docker 和 Compose，创建同名 named volumes 或使用开发 compose 的本地目录。",
+            "还原 config/、data/registry/、data/mirror-registry.db 和 .env，并设置原始 CREDENTIALS_SECRET_KEY。",
+            "只启动 registry 与 panel，运行 /api/backup-restore/verify 和 /api/backup-restore/drill。",
+            "确认 Registry /v2/ 和至少一个样本 manifest 可读后，再启动 sync。",
+        ],
+        "rollback": [
+            "恢复前保留目标机器原 data/ 与 .env 快照。",
+            "如果密钥不一致，立即停止 panel/sync，恢复原始 CREDENTIALS_SECRET_KEY 后重跑只读演练。",
+            "如果磁盘不足，不要启动 sync；扩容或更换数据盘后再恢复 registry 数据。",
+        ],
+        "commands": {
+            "source_report": "powershell -ExecutionPolicy Bypass -File .\\scripts\\migration-report.ps1 -ReportPath .\\migration-report.json",
+            "restore_drill": "powershell -ExecutionPolicy Bypass -File .\\scripts\\restore-drill.ps1",
+            "queue": "curl http://localhost:8080/api/sync-queue",
+        },
+        "manifest": build_migration_package_manifest(),
     }
 
 
@@ -4202,6 +4367,23 @@ def backup_restore_package_manifest():
 async def backup_restore_drill(body: BackupRestoreDrillIn):
     result = await run_backup_restore_drill(body)
     audit_log("drill", "backup_restore", "readonly", {"ok": result["ok"], "summary": result["summary"]})
+    return result
+
+
+@app.get("/api/migration/plan")
+def get_migration_restore_plan():
+    return build_migration_restore_plan()
+
+
+@app.get("/api/migration/package-manifest")
+def get_migration_package_manifest(include_registry_checksums: bool = False):
+    return build_migration_package_manifest(include_registry_checksums=include_registry_checksums)
+
+
+@app.post("/api/migration/preflight", dependencies=[Depends(require_write_token)])
+def run_migration_preflight():
+    result = build_migration_preflight()
+    audit_log("preflight", "migration", "readonly", {"ok": result["ok"], "summary": result["summary"]})
     return result
 
 

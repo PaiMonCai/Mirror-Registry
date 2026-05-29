@@ -81,6 +81,7 @@ def require_paths() -> None:
         "scripts/check-runtime.ps1",
         "scripts/prod-smoke.ps1",
         "scripts/restore-drill.ps1",
+        "scripts/migration-report.ps1",
         "scripts/release-check.ps1",
         "scripts/build-dev-images.ps1",
         "tests/test_panel.py",
@@ -349,6 +350,15 @@ def require_panel_features() -> None:
         "backup_restore_package_manifest",
         "backup_restore_drill",
         "verify_credentials_decryptable",
+        "file_sha256",
+        "directory_inventory",
+        "migration_manifest_item",
+        "build_migration_package_manifest",
+        "build_migration_preflight",
+        "build_migration_restore_plan",
+        "get_migration_restore_plan",
+        "get_migration_package_manifest",
+        "run_migration_preflight",
         "search_storage",
         "get_storage_image_detail",
         "list_schedules",
@@ -459,9 +469,15 @@ def require_panel_features() -> None:
         "@app.get(\"/api/backup-restore-guide\")",
         "@app.get(\"/api/backup-restore/package-manifest\")",
         "@app.post(\"/api/backup-restore/drill\"",
+        "@app.get(\"/api/migration/plan\")",
+        "@app.get(\"/api/migration/package-manifest\")",
+        "@app.post(\"/api/migration/preflight\"",
         "BackupRestoreDrillIn",
         "恢复演练默认只读",
         "restore-drill.ps1",
+        "migration-report.ps1",
+        "CREDENTIALS_SECRET_KEY",
+        "sync_queue",
         "package_manifest",
         "protected_environment",
         "release_tag",
@@ -666,6 +682,10 @@ def require_frontend_features() -> None:
         "/backup-restore-guide",
         "/backup-restore/drill",
         "恢复演练",
+        "/migration/plan",
+        "/migration/preflight",
+        "迁移恢复向导",
+        "迁移预检",
         "仓库治理",
         "/schedules",
         "计划推送",
@@ -773,6 +793,9 @@ def require_tests_and_docs() -> None:
         "/api/backup-restore-guide",
         "/api/backup-restore/package-manifest",
         "/api/backup-restore/drill",
+        "/api/migration/plan",
+        "/api/migration/preflight",
+        "migration-report.ps1",
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
@@ -865,6 +888,8 @@ def require_tests_and_docs() -> None:
         "NOTIFY_DEDUPE_SECONDS",
         "同步队列",
         "/api/sync-queue",
+        "跨机器迁移",
+        "/api/migration/plan",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -911,6 +936,8 @@ def require_tests_and_docs() -> None:
         "NOTIFY_DEDUPE_SECONDS",
         "Sync Queue",
         "/api/sync-queue",
+        "Cross-machine Migration",
+        "/api/migration/plan",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -981,6 +1008,19 @@ def require_tests_and_docs() -> None:
     ]:
         if snippet not in restore_drill_script:
             fail(f"scripts/restore-drill.ps1 missing {snippet!r}")
+    migration_script = read("scripts/migration-report.ps1")
+    for snippet in [
+        "IncludeRegistryChecksums",
+        "Get-FileHash",
+        "CREDENTIALS_SECRET_KEY",
+        "data\\registry",
+        "data\\mirror-registry.db",
+        "readonly",
+        "ReportPath",
+        "checksum_mode",
+    ]:
+        if snippet not in migration_script:
+            fail(f"scripts/migration-report.ps1 missing {snippet!r}")
     release_check_script = read("scripts/release-check.ps1")
     for snippet in [
         "Version",

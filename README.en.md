@@ -132,6 +132,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - Restore drills can run from the Governance page or `scripts\restore-drill.ps1` to produce a read-only report for the backup package shape, SQLite, Registry data directory, and credentials master key without starting sync.
 - The security guide separates the panel HTTPS entry from the Registry `/v2/` HTTPS entry, and sync does not need an exposed inbound port.
 
+## Cross-machine Migration
+
+- The panel exposes `/api/migration/plan`, `/api/migration/package-manifest`, and `/api/migration/preflight` for a read-only migration guide, package manifest, and preflight checks.
+- `scripts\migration-report.ps1` outputs a JSON report on the source or target machine for `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, `CREDENTIALS_SECRET_KEY`, Docker availability, and disk space.
+- The default migration flow does not replace target volumes automatically; drain `/api/sync-queue`, stop registry, package data, restore it on the target machine, then run the restore drill.
+- If the restored data uses a different `CREDENTIALS_SECRET_KEY`, encrypted credentials remain unreadable; stop panel/sync, restore the original key, and rerun the read-only drill.
+
 ## Automated Publishing and Scheduled Push
 
 - The `Dev Images` workflow supports manual dispatch and nightly schedule. Scheduled images publish `nightly-YYYYMMDD` and `dev-<sha>` only; they never overwrite release `latest`.

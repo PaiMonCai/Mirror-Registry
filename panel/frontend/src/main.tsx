@@ -114,7 +114,7 @@ function App() {
   const [security, setSecurity] = useState<AnyRecord>({});
   const [settings, setSettings] = useState<AnyRecord>({});
   const [credentials, setCredentials] = useState<AnyRecord[]>([]);
-  const [governance, setGovernance] = useState<AnyRecord>({ rules: [], policies: [], backup: {} });
+  const [governance, setGovernance] = useState<AnyRecord>({ rules: [], policies: [], backup: {}, migration: {} });
   const [schedules, setSchedules] = useState<AnyRecord[]>([]);
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
@@ -214,12 +214,13 @@ function App() {
   }
 
   async function loadGovernance() {
-    const [rules, policies, backup] = await Promise.all([
+    const [rules, policies, backup, migration] = await Promise.all([
       api('GET', '/tag-protection'),
       api('GET', '/retention-policies'),
       api('GET', '/backup-restore-guide'),
+      api('GET', '/migration/plan'),
     ]);
-    setGovernance({ rules, policies, backup });
+    setGovernance({ rules, policies, backup, migration });
   }
 
   async function loadSchedules() {
@@ -656,6 +657,7 @@ function Governance({ governance, api, reload, notify }: any) {
   const [policy, setPolicy] = useState({ id: '', name: '', repo_pattern: '*', environment: '*', keep_last: 5, max_age_days: 30, enabled: false });
   const [dryRun, setDryRun] = useState<AnyRecord | null>(null);
   const [restoreDrill, setRestoreDrill] = useState<AnyRecord | null>(null);
+  const [migrationPreflight, setMigrationPreflight] = useState<AnyRecord | null>(null);
   async function saveRule() {
     await api('POST', '/tag-protection', { ...rule, id: rule.id || undefined });
     await reload();
@@ -676,6 +678,11 @@ function Governance({ governance, api, reload, notify }: any) {
     const result = await api('POST', '/backup-restore/drill', { require_credentials_secret: true, verify_registry_sample: false });
     setRestoreDrill(result);
     notify(`恢复演练: ${result.summary.status}`);
+  }
+  async function runMigrationPreflight() {
+    const result = await api('POST', '/migration/preflight', {});
+    setMigrationPreflight(result);
+    notify(`迁移预检: ${result.summary.status}`);
   }
   return (
     <div className="stack">
@@ -707,6 +714,23 @@ function Governance({ governance, api, reload, notify }: any) {
       <Panel title="备份恢复清单" action={<button onClick={runRestoreDrill}><ListChecks size={16} />恢复演练</button>}>
         <pre>{JSON.stringify(governance.backup || {}, null, 2)}</pre>
         {restoreDrill && <pre>{JSON.stringify(restoreDrill, null, 2)}</pre>}
+      </Panel>
+      <Panel title="迁移恢复向导" action={<button onClick={runMigrationPreflight}><ListChecks size={16} />迁移预检</button>}>
+        <div className="chip-list">
+          <span className="chip">配置 {governance.migration?.manifest?.source?.app_version || '-'}</span>
+          <span className="chip">镜像 {governance.migration?.manifest?.source?.image_tag || '-'}</span>
+          <span className="chip">队列 {governance.migration?.manifest?.queue?.active ?? 0}</span>
+        </div>
+        {migrationPreflight ? (
+          <table><thead><tr><th>检查项</th><th>状态</th><th>结果</th><th>建议</th></tr></thead>
+            <tbody>{(migrationPreflight.checks || []).map((item: AnyRecord) => <tr key={item.name}><td>{item.name}</td><td><Badge value={item.status} /></td><td>{item.message}</td><td>{item.suggestion || '-'}</td></tr>)}</tbody>
+          </table>
+        ) : (
+          <table><thead><tr><th>阶段</th><th>步骤</th></tr></thead>
+            <tbody>{(governance.migration?.restore_steps || []).map((step: string, index: number) => <tr key={step}><td>{index + 1}</td><td>{step}</td></tr>)}</tbody>
+          </table>
+        )}
+        <pre>{JSON.stringify(governance.migration?.commands || {}, null, 2)}</pre>
       </Panel>
     </div>
   );

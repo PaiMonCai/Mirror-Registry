@@ -132,6 +132,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - 恢复演练可通过面板「仓库治理」页或 `scripts\restore-drill.ps1` 生成只读报告，验证备份包结构、SQLite、Registry 数据目录和凭据主密钥，不会启动 sync。
 - 安全指南区分管理面板 HTTPS 入口和 Registry `/v2/` HTTPS 入口，sync 不需要暴露入站端口。
 
+## 跨机器迁移
+
+- 面板提供 `/api/migration/plan`、`/api/migration/package-manifest` 和 `/api/migration/preflight`，用于生成只读迁移向导、备份清单和迁移前检查。
+- `scripts\migration-report.ps1` 可在源机器或目标机器输出 JSON 报告，检查 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env`、`CREDENTIALS_SECRET_KEY`、Docker 和磁盘空间。
+- 默认迁移流程不会自动替换目标数据卷；先等待 `/api/sync-queue` 清空，再停止 registry、打包数据、还原到目标机器并运行恢复演练。
+- 如果旧数据卷的 `CREDENTIALS_SECRET_KEY` 不一致，面板只能读到加密凭据但无法解密，应停止 panel/sync 后恢复原始密钥再重试。
+
 ## 自动发布与计划推送
 
 - `Dev Images` workflow 支持手动触发和 nightly 定时触发，定时镜像只发布 `nightly-YYYYMMDD` 和 `dev-<sha>`，不会覆盖正式 `latest`。
