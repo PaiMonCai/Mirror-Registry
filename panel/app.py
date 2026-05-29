@@ -29,6 +29,7 @@ from .schemas import (
     CredentialIn,
     CredentialTestIn,
     LoginIn,
+    MirrorDiscoveryIn,
     MirrorGroupIn,
     MirrorImportIn,
     MirrorIn,
@@ -790,6 +791,45 @@ def validate_image_ref(value: str, field_name: str) -> str:
     return image
 
 
+def split_image_ref(value: str) -> tuple[str, str, str]:
+    image = value.strip()
+    name, tag = image.rsplit(":", 1)
+    first, rest = (name.split("/", 1) + [""])[:2]
+    has_registry = bool(rest) and ("." in first or ":" in first or first == "localhost")
+    repo = rest if has_registry else name
+    registry = first if has_registry else ""
+    return registry, repo, tag
+
+
+def canonical_discovered_source(value: str) -> str:
+    image = validate_image_ref(value, "source")
+    registry, repo, tag = split_image_ref(image)
+    if registry:
+        return image
+    if "/" not in repo:
+        repo = f"library/{repo}"
+    return f"docker.io/{repo}:{tag}"
+
+
+def normalize_target_registry(value: str) -> str:
+    raw = value.strip().rstrip("/")
+    if not raw:
+        raise HTTPException(400, "target_registry 不能为空")
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if not parsed.netloc:
+            raise HTTPException(400, "target_registry 格式不合法")
+        raw = parsed.netloc
+    if "/" in raw or raw.startswith(".") or raw.endswith("."):
+        raise HTTPException(400, "target_registry 只能是 Registry host，不包含路径")
+    return raw
+
+
+def discovery_target_for_source(source: str, target_registry: str) -> str:
+    _, repo, tag = split_image_ref(source)
+    return validate_image_ref(f"{normalize_target_registry(target_registry)}/{repo}:{tag}", "target")
+
+
 def validate_repo_tag(repo: str, tag: str) -> tuple[str, str]:
     clean_repo = repo.strip()
     clean_tag = tag.strip()
@@ -1348,6 +1388,247 @@ def write_trigger(reason: str, source: str | None = None, sources: list[str] | N
     atomic_write_text(TRIGGER_PATH, json.dumps(payload, ensure_ascii=False))
 
 
+def validate_discovery_mode(value: str) -> str:
+    mode = (value or "missing_only").strip().lower()
+    if mode not in {"missing_only", "merge", "replace"}:
+        raise HTTPException(400, "mode 必须是 missing_only、merge 或 replace")
+    return mode
+
+
+def validate_discovery_source_type(value: str) -> str:
+    source_type = (value or "auto").strip().lower()
+    if source_type not in {"auto", "compose", "kubernetes", "text"}:
+        raise HTTPException(400, "source_type 必须是 auto、compose、kubernetes 或 text")
+    return source_type
+
+
+def yaml_documents(content: str) -> list[object]:
+    try:
+        return [doc for doc in yaml.safe_load_all(content) if doc is not None]
+    except yaml.YAMLError as exc:
+        raise HTTPException(400, f"YAML 无法解析: {exc}") from exc
+
+
+def extract_compose_images(doc: object) -> list[dict]:
+    if not isinstance(doc, dict):
+        return []
+    services = doc.get("services")
+    if not isinstance(services, dict):
+        return []
+    entries = []
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        image = service.get("image")
+        if isinstance(image, str) and image.strip():
+            entries.append(
+                {
+                    "image": image.strip(),
+                    "source_type": "compose",
+                    "location": f"services.{service_name}.image",
+                }
+            )
+    return entries
+
+
+def extract_kubernetes_images_from_spec(spec: object, prefix: str) -> list[dict]:
+    if not isinstance(spec, dict):
+        return []
+    entries = []
+    for key in ["containers", "initContainers", "ephemeralContainers"]:
+        containers = spec.get(key)
+        if not isinstance(containers, list):
+            continue
+        for index, container in enumerate(containers):
+            if not isinstance(container, dict):
+                continue
+            image = container.get("image")
+            name = str(container.get("name") or index)
+            if isinstance(image, str) and image.strip():
+                entries.append(
+                    {
+                        "image": image.strip(),
+                        "source_type": "kubernetes",
+                        "location": f"{prefix}.{key}.{name}.image",
+                    }
+                )
+    return entries
+
+
+def extract_kubernetes_images(doc: object) -> list[dict]:
+    if not isinstance(doc, dict):
+        return []
+    kind = str(doc.get("kind") or "Object")
+    name = str(doc.get("metadata", {}).get("name") or "unnamed") if isinstance(doc.get("metadata"), dict) else "unnamed"
+    spec = doc.get("spec")
+    entries = extract_kubernetes_images_from_spec(spec, f"{kind}/{name}.spec")
+    if isinstance(spec, dict):
+        template = spec.get("template")
+        if isinstance(template, dict):
+            entries.extend(extract_kubernetes_images_from_spec(template.get("spec"), f"{kind}/{name}.spec.template.spec"))
+        job_template = spec.get("jobTemplate")
+        if isinstance(job_template, dict):
+            job_spec = job_template.get("spec")
+            if isinstance(job_spec, dict):
+                job_template_spec = job_spec.get("template")
+                if isinstance(job_template_spec, dict):
+                    entries.extend(
+                        extract_kubernetes_images_from_spec(
+                            job_template_spec.get("spec"),
+                            f"{kind}/{name}.spec.jobTemplate.spec.template.spec",
+                        )
+                    )
+    return entries
+
+
+def extract_text_images(content: str) -> list[dict]:
+    entries = []
+    for index, line in enumerate(content.splitlines(), start=1):
+        clean = line.strip()
+        if not clean or clean.startswith("#"):
+            continue
+        if " #" in clean:
+            clean = clean.split(" #", 1)[0].strip()
+        clean = clean.strip("- ").strip("'\"")
+        if clean:
+            entries.append({"image": clean, "source_type": "text", "location": f"line {index}"})
+    return entries
+
+
+def extract_discovery_entries(content: str, source_type: str) -> list[dict]:
+    clean_source_type = validate_discovery_source_type(source_type)
+    if clean_source_type == "text":
+        return extract_text_images(content)
+    docs = yaml_documents(content)
+    compose_entries = []
+    kubernetes_entries = []
+    if clean_source_type in {"auto", "compose"}:
+        for doc in docs:
+            compose_entries.extend(extract_compose_images(doc))
+    if clean_source_type in {"auto", "kubernetes"}:
+        for doc in docs:
+            kubernetes_entries.extend(extract_kubernetes_images(doc))
+    if clean_source_type == "compose":
+        return compose_entries
+    if clean_source_type == "kubernetes":
+        return kubernetes_entries
+    return compose_entries + kubernetes_entries if compose_entries or kubernetes_entries else extract_text_images(content)
+
+
+def discovery_importable(action: str, mode: str) -> bool:
+    if action == "new":
+        return True
+    if action == "existing_source":
+        return mode in {"merge", "replace"}
+    if action == "existing_target_conflict":
+        return mode == "replace"
+    return False
+
+
+def build_discovery_preview(body: MirrorDiscoveryIn) -> dict:
+    mode = validate_discovery_mode(body.mode)
+    target_registry = normalize_target_registry(body.target_registry)
+    config = load_config()
+    existing_mirrors = valid_mirrors(config)
+    existing_by_source = {mirror["source"]: mirror for mirror in existing_mirrors}
+    existing_by_target = {mirror["target"]: mirror for mirror in existing_mirrors}
+    groups = group_map(config)
+    entries = extract_discovery_entries(body.content, body.source_type)
+    seen_sources: set[str] = set()
+    seen_targets: set[str] = set()
+    items = []
+    problems = []
+
+    for entry in entries[:500]:
+        raw_image = str(entry.get("image") or "").strip()
+        item = {
+            "raw": raw_image,
+            "source": "",
+            "target": "",
+            "source_type": entry.get("source_type") or validate_discovery_source_type(body.source_type),
+            "location": entry.get("location") or "",
+            "action": "invalid",
+            "reason": "",
+            "importable": False,
+        }
+        try:
+            source = canonical_discovered_source(raw_image)
+            target = discovery_target_for_source(source, target_registry)
+            mirror = normalize_mirror(
+                {
+                    "source": source,
+                    "target": target,
+                    "registry": body.registry,
+                    "group": body.group,
+                    "project": body.project,
+                    "environment": body.environment,
+                    "namespace": body.namespace,
+                    "source_credential_id": body.source_credential_id,
+                    "target_credential_id": body.target_credential_id,
+                },
+                groups,
+            )
+            action = "new"
+            reason = "will add mirror"
+            if source in seen_sources:
+                action = "duplicate_source"
+                reason = "same source appears more than once in discovery input"
+            elif target in seen_targets:
+                action = "duplicate_target"
+                reason = "same target appears more than once in discovery input"
+            elif source in existing_by_source:
+                action = "existing_source"
+                reason = "source already exists"
+            elif target in existing_by_target and mode != "replace":
+                action = "existing_target_conflict"
+                reason = "target already belongs to another source"
+            seen_sources.add(source)
+            seen_targets.add(target)
+            item.update(
+                {
+                    "source": source,
+                    "target": target,
+                    "registry": mirror["registry"],
+                    "group": mirror["group"],
+                    "project": mirror["project"],
+                    "environment": mirror["environment"],
+                    "namespace": mirror["namespace"],
+                    "source_credential_id": mirror["source_credential_id"],
+                    "target_credential_id": mirror["target_credential_id"],
+                    "action": action,
+                    "reason": reason,
+                    "importable": discovery_importable(action, mode),
+                }
+            )
+        except HTTPException as exc:
+            missing_tag = ":" not in raw_image.rsplit("/", 1)[-1]
+            item["action"] = "missing_tag" if missing_tag else "invalid"
+            item["reason"] = str(exc.detail)
+        items.append(item)
+        if not item["importable"]:
+            problems.append(item)
+
+    truncated = len(entries) > 500
+    summary = {
+        "extracted": len(entries),
+        "returned": len(items),
+        "importable": sum(1 for item in items if item["importable"]),
+        "new": sum(1 for item in items if item["action"] == "new"),
+        "existing_source": sum(1 for item in items if item["action"] == "existing_source"),
+        "target_conflicts": sum(1 for item in items if item["action"] in {"existing_target_conflict", "duplicate_target"}),
+        "invalid": sum(1 for item in items if item["action"] in {"invalid", "missing_tag"}),
+        "truncated": truncated,
+    }
+    return {
+        "mode": mode,
+        "source_type": validate_discovery_source_type(body.source_type),
+        "target_registry": target_registry,
+        "items": items,
+        "problems": problems,
+        "summary": summary,
+    }
+
+
 def latest_run() -> dict | None:
     return db_one(
         """
@@ -1613,6 +1894,61 @@ def import_mirrors(body: MirrorImportIn):
         upsert_mirror_db(mirror["source"], mirror["target"])
     audit_log("import", "mirrors", "bulk", {"imported": len(imported), "replace": body.replace})
     return {"ok": True, "imported": len(imported), "total": len(mirrors), "replace": body.replace}
+
+
+@app.post("/api/mirrors/discover")
+def discover_mirrors(body: MirrorDiscoveryIn):
+    return build_discovery_preview(body)
+
+
+@app.post("/api/mirrors/discover/import", dependencies=[Depends(require_write_token)])
+def import_discovered_mirrors(body: MirrorDiscoveryIn):
+    preview = build_discovery_preview(body)
+    mode = preview["mode"]
+    imported = [
+        normalize_mirror(item)
+        for item in preview["items"]
+        if item.get("importable")
+    ]
+    if not imported:
+        raise HTTPException(400, "发现结果没有可导入镜像")
+
+    config = load_config()
+    if mode == "replace":
+        mirrors = imported
+    else:
+        mirrors_by_source = {mirror["source"]: mirror for mirror in valid_mirrors(config)}
+        for mirror in imported:
+            if mode == "missing_only" and mirror["source"] in mirrors_by_source:
+                continue
+            mirrors_by_source[mirror["source"]] = mirror
+        mirrors = list(mirrors_by_source.values())
+    config["mirrors"] = mirrors
+    save_config(config)
+    for mirror in imported:
+        upsert_mirror_db(mirror["source"], mirror["target"])
+    if body.trigger_sync:
+        write_trigger("discover-import", sources=[mirror["source"] for mirror in imported])
+    audit_log(
+        "discover_import",
+        "mirrors",
+        "bulk",
+        {
+            "mode": mode,
+            "imported": len(imported),
+            "total": len(mirrors),
+            "trigger_sync": bool(body.trigger_sync),
+            "source_type": preview["source_type"],
+        },
+    )
+    return {
+        "ok": True,
+        "mode": mode,
+        "imported": len(imported),
+        "total": len(mirrors),
+        "trigger_sync": bool(body.trigger_sync),
+        "summary": preview["summary"],
+    }
 
 
 @app.post("/api/mirrors", dependencies=[Depends(require_write_token)])

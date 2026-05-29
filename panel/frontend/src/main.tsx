@@ -426,6 +426,25 @@ function Runs({ runs, selectedRun, setSelectedRun, api, reload, notify }: any) {
 
 function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify }: any) {
   const [form, setForm] = useState({ source: '', target: '', source_credential_id: '', target_credential_id: '' });
+  const [discoveryForm, setDiscoveryForm] = useState({
+    source_type: 'auto',
+    target_registry: 'localhost:5000',
+    mode: 'missing_only',
+    trigger_sync: false,
+    content: '',
+  });
+  const [discoveryResult, setDiscoveryResult] = useState<AnyRecord | null>(null);
+  async function discover() {
+    const result = await api('POST', '/mirrors/discover', discoveryForm);
+    setDiscoveryResult(result);
+    notify(`发现 ${result.summary.importable} 个可导入镜像`);
+  }
+  async function importDiscovery() {
+    const result = await api('POST', '/mirrors/discover/import', discoveryForm);
+    setDiscoveryResult({ ...(discoveryResult || {}), summary: result.summary });
+    await reload();
+    notify(`已导入 ${result.imported} 个镜像`);
+  }
   return (
     <div className="stack">
       <Panel title="添加镜像">
@@ -436,6 +455,37 @@ function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify 
           <select value={form.target_credential_id} onChange={(e) => setForm({ ...form, target_credential_id: e.target.value })}><option value="">目标凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
           <button className="primary" onClick={() => api('POST', '/mirrors', form).then(() => { setForm({ source: '', target: '', source_credential_id: '', target_credential_id: '' }); reload(); notify('镜像已添加'); })}>添加</button>
         </div>
+      </Panel>
+      <Panel title="镜像发现">
+        <div className="form-grid discovery-form">
+          <select value={discoveryForm.source_type} onChange={(e) => setDiscoveryForm({ ...discoveryForm, source_type: e.target.value })}>
+            <option value="auto">自动识别</option>
+            <option value="compose">Docker Compose</option>
+            <option value="kubernetes">Kubernetes YAML</option>
+            <option value="text">纯文本</option>
+          </select>
+          <input value={discoveryForm.target_registry} onChange={(e) => setDiscoveryForm({ ...discoveryForm, target_registry: e.target.value })} placeholder="localhost:5000" />
+          <select value={discoveryForm.mode} onChange={(e) => setDiscoveryForm({ ...discoveryForm, mode: e.target.value })}>
+            <option value="missing_only">只导入缺失项</option>
+            <option value="merge">合并导入</option>
+            <option value="replace">覆盖导入</option>
+          </select>
+          <label className="checkline"><input type="checkbox" checked={discoveryForm.trigger_sync} onChange={(e) => setDiscoveryForm({ ...discoveryForm, trigger_sync: e.target.checked })} />导入后同步</label>
+          <textarea className="discovery-textarea" value={discoveryForm.content} onChange={(e) => setDiscoveryForm({ ...discoveryForm, content: e.target.value })} placeholder="services:&#10;  web:&#10;    image: nginx:1.27" />
+          <button onClick={discover}><Search size={16} />dry-run</button>
+          <button className="primary" onClick={importDiscovery}>导入</button>
+        </div>
+        {discoveryResult && <div className="discovery-result">
+          <div className="chip-list">
+            <span className="chip">发现 {discoveryResult.summary?.extracted ?? 0}</span>
+            <span className="chip">可导入 {discoveryResult.summary?.importable ?? 0}</span>
+            <span className="chip">新增 {discoveryResult.summary?.new ?? 0}</span>
+            <span className="chip">问题 {discoveryResult.problems?.length ?? discoveryResult.summary?.invalid ?? 0}</span>
+          </div>
+          <table><thead><tr><th>来源</th><th>源镜像</th><th>目标</th><th>状态</th></tr></thead>
+            <tbody>{(discoveryResult.items || []).map((item: AnyRecord, index: number) => <tr key={`${item.location}-${index}`}><td>{item.location || item.source_type}</td><td>{item.source || item.raw}</td><td>{item.target || '-'}</td><td><Badge value={item.action} /></td></tr>)}</tbody>
+          </table>
+        </div>}
       </Panel>
       <Panel title="镜像列表" action={<div className="search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
         <table><thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>

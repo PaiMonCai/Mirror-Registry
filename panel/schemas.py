@@ -25,6 +25,21 @@ class MirrorImportIn(BaseModel):
     mirror_groups: list[dict] = Field(default_factory=list, max_length=100)
 
 
+class MirrorDiscoveryIn(BaseModel):
+    content: str = Field(min_length=1, max_length=200000)
+    source_type: str = Field(default="auto", max_length=16)
+    target_registry: str = Field(default="localhost:5000", min_length=1, max_length=255)
+    registry: str = Field(default="local", min_length=1, max_length=64)
+    group: str = Field(default="default", min_length=1, max_length=64)
+    project: str = Field(default="default", min_length=1, max_length=64)
+    environment: str = Field(default="local", min_length=1, max_length=64)
+    namespace: str = Field(default="library", min_length=1, max_length=128)
+    source_credential_id: str | None = Field(default=None, max_length=64)
+    target_credential_id: str | None = Field(default=None, max_length=64)
+    mode: str = Field(default="missing_only", max_length=16)
+    trigger_sync: bool = False
+
+
 class RegistryIn(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=120)

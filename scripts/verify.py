@@ -350,6 +350,11 @@ def require_panel_features() -> None:
         "fetch_manifest",
         "recalculate_storage_stats",
         "queue_storage_stats_recalculate",
+        "build_discovery_preview",
+        "extract_compose_images",
+        "extract_kubernetes_images",
+        "extract_text_images",
+        "import_discovered_mirrors",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -428,6 +433,16 @@ def require_panel_features() -> None:
         "MANIFEST_ACCEPT",
         "Docker-Content-Digest",
         "@app.post(\"/api/storage/stats/recalculate\"",
+        "MirrorDiscoveryIn",
+        "@app.post(\"/api/mirrors/discover\")",
+        "@app.post(\"/api/mirrors/discover/import\"",
+        "source_type 必须是 auto、compose、kubernetes 或 text",
+        "mode 必须是 missing_only、merge 或 replace",
+        "services.{service_name}.image",
+        "initContainers",
+        "ephemeralContainers",
+        "discover-import",
+        "discover_import",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -569,6 +584,16 @@ def require_frontend_features() -> None:
         "/schedules",
         "计划推送",
         "/storage/stats/recalculate",
+        "/mirrors/discover",
+        "/mirrors/discover/import",
+        "镜像发现",
+        "Docker Compose",
+        "Kubernetes YAML",
+        "纯文本",
+        "只导入缺失项",
+        "合并导入",
+        "覆盖导入",
+        "导入后同步",
         "逻辑体积",
         "去重体积",
         "共享层",
@@ -648,6 +673,11 @@ def require_tests_and_docs() -> None:
         "test_unauthenticated_api_requires_login",
         "test_bearer_token_remains_automation_compatible",
         "test_session_expiry_requires_login_again",
+        "/api/mirrors/discover",
+        "/api/mirrors/discover/import",
+        "test_mirror_discovery_dry_run_from_compose_does_not_write_config",
+        "test_mirror_discovery_imports_kubernetes_images_and_can_trigger_sync",
+        "test_mirror_discovery_text_detects_existing_sources_and_replace_mode",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")

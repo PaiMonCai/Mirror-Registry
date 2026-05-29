@@ -300,6 +300,114 @@ def test_mirror_export_import(panel_app):
     assert exported["version"] == 2
 
 
+def test_mirror_discovery_dry_run_from_compose_does_not_write_config(panel_app):
+    client, config_path, _, _ = panel_app
+    before = config_path.read_text(encoding="utf-8")
+    payload = {
+        "source_type": "compose",
+        "target_registry": "localhost:5000",
+        "content": """
+services:
+  web:
+    image: nginx:1.27
+  api:
+    image: ghcr.io/example/api:v2
+  bad:
+    image: redis
+""",
+    }
+
+    response = client.post("/api/mirrors/discover", json=payload)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"]["extracted"] == 3
+    assert data["summary"]["importable"] == 2
+    assert data["summary"]["invalid"] == 1
+    assert data["items"][0]["source"] == "docker.io/library/nginx:1.27"
+    assert data["items"][0]["target"] == "localhost:5000/library/nginx:1.27"
+    assert data["items"][2]["action"] == "missing_tag"
+    assert config_path.read_text(encoding="utf-8") == before
+
+
+def test_mirror_discovery_imports_kubernetes_images_and_can_trigger_sync(panel_app):
+    client, config_path, _, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    payload = {
+        "source_type": "kubernetes",
+        "target_registry": "localhost:5000",
+        "mode": "missing_only",
+        "trigger_sync": True,
+        "content": """
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: migrate
+          image: ghcr.io/example/migrate:v1
+      containers:
+        - name: api
+          image: ghcr.io/example/api:v2
+        - name: sidecar
+          image: busybox:1.36
+""",
+    }
+
+    response = client.post("/api/mirrors/discover/import", json=payload, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["imported"] == 3
+    content = config_path.read_text(encoding="utf-8")
+    assert "ghcr.io/example/migrate:v1" in content
+    assert "ghcr.io/example/api:v2" in content
+    assert "docker.io/library/busybox:1.36" in content
+    trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
+    assert trigger["reason"] == "discover-import"
+    assert sorted(trigger["sources"]) == [
+        "docker.io/library/busybox:1.36",
+        "ghcr.io/example/api:v2",
+        "ghcr.io/example/migrate:v1",
+    ]
+    audit = client.get("/api/audit-logs").json()
+    assert any(item["action"] == "discover_import" for item in audit)
+
+
+def test_mirror_discovery_text_detects_existing_sources_and_replace_mode(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/nginx:1.27",
+            "target": "localhost:5000/library/nginx:1.27",
+        },
+        headers=headers,
+    )
+    payload = {
+        "source_type": "text",
+        "target_registry": "localhost:5000",
+        "mode": "missing_only",
+        "content": "nginx:1.27\npostgres:16\n",
+    }
+
+    dry_run = client.post("/api/mirrors/discover", json=payload).json()
+
+    assert dry_run["summary"]["existing_source"] == 1
+    assert dry_run["summary"]["new"] == 1
+    assert [item["action"] for item in dry_run["items"]] == ["existing_source", "new"]
+    replace = client.post(
+        "/api/mirrors/discover",
+        json={**payload, "mode": "replace"},
+        headers=headers,
+    ).json()
+    assert replace["items"][0]["importable"] is True
+
+
 def test_retry_failed_run_writes_sources_trigger(panel_app):
     client, _, _, trigger_path = panel_app
     headers = {"Authorization": "Bearer test-token"}
