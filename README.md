@@ -39,6 +39,7 @@ DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
+CREDENTIALS_SECRET_KEY=
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` 默认是 `latest`。如果要锁定正式版本，可以改成指定 tag：
@@ -48,6 +49,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 管理面板会把令牌保存在浏览器 local storage 中，并在新增、修改、删除、触发同步等写操作时通过 Bearer token 发送。
+
+## 前端工程化与仓库凭据
+
+- 管理面板前端使用 React + Vite + TypeScript 开发，构建产物继续由 FastAPI 静态托管。
+- 本地修改前端后运行 `npm.cmd run build`，生产镜像构建会在 Node 阶段执行前端 build，运行阶段不需要 Node.js。
+- 面板「仓库凭据」页可加密保存源仓库和目标仓库的用户名 + token/password。
+- 凭据支持 host 默认和单条镜像覆盖，匹配优先级为 mirror 覆盖 > host 默认 > 无凭据。
+- 生产环境保存凭据前必须设置 `CREDENTIALS_SECRET_KEY`；secret 不回显、不明文导出、不写入日志和审计详情。
+- sync 会在执行 `skopeo inspect/copy` 前生成临时 authfile，并在命令结束后清理。
 
 ## v3 管理增强能力
 
@@ -90,8 +100,8 @@ docker compose -f docker-compose.dev.yml ps
 
 ```yaml
 mirrors:
-  - source: docker.io/library/nginx:latest
-    target: localhost:5000/library/nginx:latest
+  - source: docker.io/library/busybox:latest
+    target: localhost:5000/library/busybox:latest
     registry: local
     group: default
     project: default
@@ -128,6 +138,7 @@ docker compose up -d registry
 python -m pip install -r requirements-dev.txt
 python scripts\verify.py
 .\scripts\check-runtime.ps1
+npm.cmd run build
 python -m pytest
 docker compose config
 docker compose -f docker-compose.dev.yml config

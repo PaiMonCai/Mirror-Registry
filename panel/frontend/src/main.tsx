@@ -1,0 +1,415 @@
+import React, { useEffect, useMemo, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Activity,
+  Archive,
+  Boxes,
+  CheckCircle2,
+  FileKey2,
+  Gauge,
+  HardDrive,
+  History,
+  KeyRound,
+  ListChecks,
+  Moon,
+  Play,
+  RefreshCw,
+  Search,
+  Settings,
+  ShieldCheck,
+  Sun,
+  Trash2,
+} from 'lucide-react';
+import { createApiClient } from './api';
+import './styles.css';
+
+type AnyRecord = Record<string, any>;
+type View =
+  | 'dashboard'
+  | 'runs'
+  | 'mirrors'
+  | 'credentials'
+  | 'platform'
+  | 'storage'
+  | 'diagnostics'
+  | 'logs'
+  | 'audit'
+  | 'security'
+  | 'settings';
+
+const viewMeta: Record<View, { title: string; subtitle: string; icon: React.ReactNode }> = {
+  dashboard: { title: '概览', subtitle: '运行状态、同步心跳和关键操作。', icon: <Gauge size={18} /> },
+  runs: { title: '同步任务', subtitle: '查看每轮同步和失败重试入口。', icon: <History size={18} /> },
+  mirrors: { title: '镜像配置', subtitle: '维护、导入和导出上游镜像与目标 Registry。', icon: <Boxes size={18} /> },
+  credentials: { title: '仓库凭据', subtitle: '加密保存源仓库和目标仓库认证信息。', icon: <KeyRound size={18} /> },
+  platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <Archive size={18} /> },
+  storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <HardDrive size={18} /> },
+  diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <ListChecks size={18} /> },
+  logs: { title: '日志 / 事件', subtitle: '同步日志和结构化事件。', icon: <Activity size={18} /> },
+  audit: { title: '审计', subtitle: '面板和同步服务的操作记录。', icon: <ShieldCheck size={18} /> },
+  security: { title: '安全', subtitle: '公网暴露边界和反向代理建议。', icon: <FileKey2 size={18} /> },
+  settings: { title: '设置', subtitle: '同步间隔、并发、重试、通知和数据库配置。', icon: <Settings size={18} /> },
+};
+
+const views = Object.keys(viewMeta) as View[];
+
+function cx(...parts: Array<string | false | null | undefined>) {
+  return parts.filter(Boolean).join(' ');
+}
+
+function hostFromImage(value: string) {
+  const first = value.split('/')[0];
+  return first.includes('.') || first.includes(':') || first === 'localhost' ? first : 'docker.io';
+}
+
+function App() {
+  const [view, setView] = useState<View>('dashboard');
+  const [theme, setTheme] = useState(localStorage.getItem('mirrorRegistryTheme') || 'light');
+  const [token, setToken] = useState(localStorage.getItem('mirrorRegistryToken') || '');
+  const [status, setStatus] = useState<AnyRecord>({});
+  const [mirrors, setMirrors] = useState<AnyRecord[]>([]);
+  const [runs, setRuns] = useState<AnyRecord[]>([]);
+  const [selectedRun, setSelectedRun] = useState<AnyRecord | null>(null);
+  const [platform, setPlatform] = useState<AnyRecord>({});
+  const [grouped, setGrouped] = useState<AnyRecord[]>([]);
+  const [storage, setStorage] = useState<AnyRecord>({});
+  const [diagnostics, setDiagnostics] = useState<AnyRecord>({});
+  const [logs, setLogs] = useState('');
+  const [events, setEvents] = useState<AnyRecord[]>([]);
+  const [audit, setAudit] = useState<AnyRecord[]>([]);
+  const [security, setSecurity] = useState<AnyRecord>({});
+  const [settings, setSettings] = useState<AnyRecord>({});
+  const [credentials, setCredentials] = useState<AnyRecord[]>([]);
+  const [toast, setToast] = useState('');
+  const [search, setSearch] = useState('');
+  const api = useMemo(() => createApiClient(() => token), [token]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('mirrorRegistryTheme', theme);
+  }, [theme]);
+
+  function notify(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(''), 2600);
+  }
+
+  function saveToken() {
+    if (token.trim()) localStorage.setItem('mirrorRegistryToken', token.trim());
+    else localStorage.removeItem('mirrorRegistryToken');
+    setToken(token.trim());
+    notify('令牌已保存');
+  }
+
+  async function loadStatus() {
+    const data = await api('GET', '/status');
+    setStatus(data);
+  }
+
+  async function loadMirrors() {
+    setMirrors(await api('GET', '/mirrors'));
+  }
+
+  async function loadRuns() {
+    setRuns(await api('GET', '/sync-runs?limit=30'));
+  }
+
+  async function loadPlatform() {
+    setPlatform(await api('GET', '/platform'));
+    setGrouped(await api('GET', '/platform/groups'));
+  }
+
+  async function loadStorage() {
+    setStorage(await api('GET', '/storage'));
+  }
+
+  async function loadDiagnostics() {
+    setDiagnostics(await api('POST', '/diagnostics/run'));
+  }
+
+  async function loadLogs() {
+    setLogs((await api('GET', '/logs?lines=150')).text || '');
+    setEvents(await api('GET', '/events?limit=100'));
+  }
+
+  async function loadAudit() {
+    setAudit(await api('GET', '/audit-logs?limit=100'));
+  }
+
+  async function loadSecurity() {
+    setSecurity(await api('GET', '/security-guide'));
+  }
+
+  async function loadSettings() {
+    setSettings(await api('GET', '/settings'));
+  }
+
+  async function loadCredentials() {
+    setCredentials(await api('GET', '/credentials'));
+  }
+
+  useEffect(() => {
+    loadStatus().catch((error) => notify(error.message));
+  }, []);
+
+  useEffect(() => {
+    const load = async () => {
+      if (view === 'dashboard') await loadStatus();
+      if (view === 'runs') await loadRuns();
+      if (view === 'mirrors') {
+        await loadMirrors();
+        await loadCredentials();
+      }
+      if (view === 'credentials') await loadCredentials();
+      if (view === 'platform') await loadPlatform();
+      if (view === 'storage') await loadStorage();
+      if (view === 'diagnostics') await loadDiagnostics();
+      if (view === 'logs') await loadLogs();
+      if (view === 'audit') await loadAudit();
+      if (view === 'security') await loadSecurity();
+      if (view === 'settings') await loadSettings();
+    };
+    load().catch((error) => notify(error.message));
+  }, [view]);
+
+  const filteredMirrors = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return mirrors;
+    return mirrors.filter((item) => JSON.stringify(item).toLowerCase().includes(term));
+  }, [mirrors, search]);
+
+  async function action(label: string, fn: () => Promise<void>) {
+    try {
+      await fn();
+      notify(label);
+    } catch (error: any) {
+      notify(error.message);
+    }
+  }
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark">MR</div>
+          <div>
+            <strong>Mirror Registry</strong>
+            <span>private image operations</span>
+          </div>
+        </div>
+        <nav>
+          {views.map((name) => (
+            <button key={name} className={cx('nav-button', view === name && 'active')} onClick={() => setView(name)}>
+              {viewMeta[name].icon}
+              <span>{viewMeta[name].title}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="token-card">
+          <label>写操作令牌</label>
+          <div className="inline">
+            <input value={token} type="password" placeholder="PANEL_TOKEN" onChange={(event) => setToken(event.target.value)} />
+            <button className="icon-button" onClick={saveToken} title="保存令牌">
+              <CheckCircle2 size={16} />
+            </button>
+          </div>
+          {status.using_default_token && <p className="warn">当前服务仍使用默认令牌。</p>}
+        </div>
+      </aside>
+
+      <main>
+        <header className="topbar">
+          <div>
+            <h1>{viewMeta[view].title}</h1>
+            <p>{viewMeta[view].subtitle}</p>
+          </div>
+          <div className="top-actions">
+            <button className="ghost" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="切换主题">
+              {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
+            </button>
+            <button className="primary" onClick={() => action('同步已触发', async () => { await api('POST', '/sync'); await loadStatus(); })}>
+              <Play size={16} />立即同步
+            </button>
+          </div>
+        </header>
+
+        {view === 'dashboard' && <Dashboard status={status} reload={() => action('已刷新', loadStatus)} />}
+        {view === 'runs' && <Runs runs={runs} selectedRun={selectedRun} setSelectedRun={setSelectedRun} api={api} reload={loadRuns} notify={notify} />}
+        {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
+        {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
+        {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
+        {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
+        {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
+        {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
+        {view === 'audit' && <Audit rows={audit} reload={loadAudit} />}
+        {view === 'security' && <Security guide={security} />}
+        {view === 'settings' && <SettingsView settings={settings} api={api} reload={loadSettings} notify={notify} />}
+      </main>
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+function Dashboard({ status, reload }: { status: AnyRecord; reload: () => void }) {
+  const cards = [
+    ['镜像', status.total ?? 0],
+    ['已同步', status.synced ?? 0],
+    ['待同步', status.pending ?? 0],
+    ['Registry', status.registries ?? 1],
+    ['镜像组', status.mirror_groups ?? 1],
+    ['状态', status.sync_running ? '运行中' : '就绪'],
+  ];
+  return (
+    <section className="stack">
+      <div className="metric-grid">{cards.map(([label, value]) => <Metric key={label} label={label as string} value={value} />)}</div>
+      <Panel title="运行信息" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        <dl className="kv">
+          <dt>应用版本</dt><dd>{status.app_version || '-'}</dd>
+          <dt>镜像 tag</dt><dd>{status.image_tag || '-'}</dd>
+          <dt>同步引擎</dt><dd>{status.sync_engine || 'skopeo'}</dd>
+          <dt>上次心跳</dt><dd>{status.last_heartbeat || '-'}</dd>
+        </dl>
+      </Panel>
+    </section>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: React.ReactNode }) {
+  return <div className="metric"><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function Panel({ title, action, children }: { title: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return <section className="panel"><div className="panel-head"><h2>{title}</h2>{action}</div>{children}</section>;
+}
+
+function Runs({ runs, selectedRun, setSelectedRun, api, reload, notify }: any) {
+  async function openRun(id: number) {
+    setSelectedRun(await api('GET', `/sync-runs/${id}`));
+  }
+  return (
+    <div className="stack">
+      <Panel title="任务历史" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        <table><thead><tr><th>ID</th><th>原因</th><th>状态</th><th>更新</th><th>失败</th><th>时间</th><th></th></tr></thead>
+          <tbody>{runs.map((run: AnyRecord) => <tr key={run.id}><td>{run.id}</td><td>{run.reason}</td><td><Badge value={run.status} /></td><td>{run.updated}</td><td>{run.failed}</td><td>{run.started_at}</td><td><button onClick={() => openRun(run.id)}>详情</button></td></tr>)}</tbody>
+        </table>
+      </Panel>
+      {selectedRun && <Panel title={`任务 ${selectedRun.run.id}`}>
+        <table><thead><tr><th>镜像</th><th>目标</th><th>状态</th><th>阶段</th><th>错误</th><th></th></tr></thead>
+          <tbody>{selectedRun.items.map((item: AnyRecord) => <tr key={item.id}><td>{item.source}</td><td>{item.target}</td><td><Badge value={item.status} /></td><td>{item.step}</td><td>{item.error}</td><td>{item.status === 'failed' && <button onClick={() => api('POST', `/sync-run-items/${item.id}/retry`).then(() => notify('失败项已重试'))}>重试</button>}</td></tr>)}</tbody>
+        </table>
+      </Panel>}
+    </div>
+  );
+}
+
+function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify }: any) {
+  const [form, setForm] = useState({ source: '', target: '', source_credential_id: '', target_credential_id: '' });
+  return (
+    <div className="stack">
+      <Panel title="添加镜像">
+        <div className="form-grid">
+          <input placeholder="docker.io/library/busybox:latest" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} />
+          <input placeholder="localhost:5000/library/busybox:latest" value={form.target} onChange={(e) => setForm({ ...form, target: e.target.value })} />
+          <select value={form.source_credential_id} onChange={(e) => setForm({ ...form, source_credential_id: e.target.value })}><option value="">源凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <select value={form.target_credential_id} onChange={(e) => setForm({ ...form, target_credential_id: e.target.value })}><option value="">目标凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+          <button className="primary" onClick={() => api('POST', '/mirrors', form).then(() => { setForm({ source: '', target: '', source_credential_id: '', target_credential_id: '' }); reload(); notify('镜像已添加'); })}>添加</button>
+        </div>
+      </Panel>
+      <Panel title="镜像列表" action={<div className="search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
+        <table><thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已触发'))}>同步</button><button onClick={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</button><button className="danger" onClick={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
+        </table>
+      </Panel>
+    </div>
+  );
+}
+
+function Credentials({ credentials, api, reload, notify }: any) {
+  const [form, setForm] = useState({ id: '', name: '', registry_host: '', username: '', secret: '', scope: 'both' });
+  async function save() {
+    await api('POST', '/credentials', { ...form, id: form.id || undefined });
+    setForm({ id: '', name: '', registry_host: '', username: '', secret: '', scope: 'both' });
+    await reload();
+    notify('凭据已保存');
+  }
+  return (
+    <div className="stack">
+      <Panel title="新增凭据">
+        <div className="form-grid credentials-form">
+          <input placeholder="凭据 ID（可选）" value={form.id} onChange={(e) => setForm({ ...form, id: e.target.value })} />
+          <input placeholder="显示名称" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input placeholder="registry host，例如 ghcr.io" value={form.registry_host} onChange={(e) => setForm({ ...form, registry_host: e.target.value })} />
+          <input placeholder="用户名" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+          <input type="password" placeholder="token/password" value={form.secret} onChange={(e) => setForm({ ...form, secret: e.target.value })} />
+          <select value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })}><option value="both">源和目标</option><option value="source">仅源</option><option value="target">仅目标</option></select>
+          <button className="primary" onClick={save}><KeyRound size={16} />保存凭据</button>
+        </div>
+      </Panel>
+      <Panel title="已保存凭据">
+        <table><thead><tr><th>ID</th><th>名称</th><th>Host</th><th>用户名</th><th>Scope</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>{credentials.map((c: AnyRecord) => <tr key={c.id}><td>{c.id}</td><td>{c.name}</td><td>{c.registry_host}</td><td>{c.username}</td><td>{c.scope}</td><td><Badge value={c.configured ? 'configured' : 'empty'} /></td><td className="row-actions"><button onClick={() => api('POST', `/credentials/${c.id}/test`, {}).then((r: AnyRecord) => notify(`测试结果: ${r.status}`))}>测试</button><button className="danger" onClick={() => api('DELETE', `/credentials/${c.id}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
+        </table>
+      </Panel>
+    </div>
+  );
+}
+
+function Platform({ platform, grouped, api, reload, notify }: any) {
+  const [registry, setRegistry] = useState({ id: '', name: '', url: '', copy_host: '' });
+  const [group, setGroup] = useState({ id: '', name: '', project: '', environment: '', namespace: '', registry: 'local' });
+  return (
+    <div className="stack">
+      <Panel title="Registry 目标">
+        <div className="chip-list">{(platform.registries || []).map((item: AnyRecord) => <span className="chip" key={item.id}>{item.id} · {item.url}</span>)}</div>
+        <div className="form-grid"><input placeholder="id" value={registry.id} onChange={(e) => setRegistry({ ...registry, id: e.target.value })} /><input placeholder="name" value={registry.name} onChange={(e) => setRegistry({ ...registry, name: e.target.value })} /><input placeholder="url" value={registry.url} onChange={(e) => setRegistry({ ...registry, url: e.target.value })} /><input placeholder="copy_host" value={registry.copy_host} onChange={(e) => setRegistry({ ...registry, copy_host: e.target.value })} /><button onClick={() => api('POST', '/registries', registry).then(() => { reload(); notify('Registry 已保存'); })}>保存</button></div>
+      </Panel>
+      <Panel title="镜像组">
+        <div className="chip-list">{(platform.mirror_groups || []).map((item: AnyRecord) => <span className="chip" key={item.id}>{item.project}/{item.environment}/{item.namespace}</span>)}</div>
+        <div className="form-grid"><input placeholder="id" value={group.id} onChange={(e) => setGroup({ ...group, id: e.target.value })} /><input placeholder="name" value={group.name} onChange={(e) => setGroup({ ...group, name: e.target.value })} /><input placeholder="project" value={group.project} onChange={(e) => setGroup({ ...group, project: e.target.value })} /><input placeholder="environment" value={group.environment} onChange={(e) => setGroup({ ...group, environment: e.target.value })} /><input placeholder="namespace" value={group.namespace} onChange={(e) => setGroup({ ...group, namespace: e.target.value })} /><button onClick={() => api('POST', '/mirror-groups', group).then(() => { reload(); notify('镜像组已保存'); })}>保存</button></div>
+      </Panel>
+      <Panel title="分组视图"><pre>{JSON.stringify(grouped, null, 2)}</pre></Panel>
+    </div>
+  );
+}
+
+function Storage({ storage, api, reload, notify }: any) {
+  return (
+    <div className="stack">
+      <Panel title="本地仓库">
+        <table><thead><tr><th>仓库</th><th>Tag</th><th>估算占用</th><th>删除标记</th></tr></thead>
+          <tbody>{(storage.images || []).flatMap((image: AnyRecord) => (image.tags || []).map((tag: AnyRecord) => <tr key={`${image.repo}:${tag.name}`}><td>{image.repo}</td><td>{tag.name}</td><td>{image.estimated_size_bytes ?? '-'}</td><td>{tag.marked_for_deletion ? '已标记' : <button onClick={() => api('POST', '/storage/delete-mark', { repo: image.repo, tag: tag.name, reason: 'manual' }).then(() => { reload(); notify('已标记'); })}>标记</button>}</td></tr>))}</tbody>
+        </table>
+      </Panel>
+      <Panel title="垃圾回收指引"><pre>{(storage.garbage_collection?.commands || []).join('\n')}</pre></Panel>
+    </div>
+  );
+}
+
+function Diagnostics({ diagnostics, reload }: any) {
+  return <Panel title="诊断结果" action={<button onClick={reload}><RefreshCw size={16} />重新检查</button>}><div className="check-grid">{(diagnostics.checks || []).map((item: AnyRecord) => <div className="check" key={item.name}><Badge value={item.status} /><strong>{item.name}</strong><span>{item.message}</span></div>)}</div></Panel>;
+}
+
+function Logs({ logs, events, reload }: any) {
+  return <div className="stack"><Panel title="文本日志" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}><pre>{logs}</pre></Panel><Panel title="事件"><table><tbody>{events.map((e: AnyRecord) => <tr key={e.id}><td>{e.created_at}</td><td><Badge value={e.level} /></td><td>{e.message}</td></tr>)}</tbody></table></Panel></div>;
+}
+
+function Audit({ rows, reload }: any) {
+  return <Panel title="审计日志" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}><table><thead><tr><th>时间</th><th>Actor</th><th>动作</th><th>资源</th><th>详情</th></tr></thead><tbody>{rows.map((row: AnyRecord) => <tr key={row.id}><td>{row.created_at}</td><td>{row.actor}</td><td>{row.action}</td><td>{row.resource_type}:{row.resource_id}</td><td><code>{JSON.stringify(row.detail)}</code></td></tr>)}</tbody></table></Panel>;
+}
+
+function Security({ guide }: any) {
+  return <div className="stack"><Panel title="公网暴露安全边界"><p>{guide.public_exposure_boundary}</p></Panel><Panel title="Nginx Basic Auth"><pre>{(guide.nginx_basic_auth || []).join('\n')}</pre></Panel></div>;
+}
+
+function SettingsView({ settings, api, reload, notify }: any) {
+  const [form, setForm] = useState<AnyRecord>({});
+  useEffect(() => setForm(settings || {}), [settings]);
+  return <Panel title="同步设置"><div className="form-grid"><input type="number" value={form.check_interval_minutes || ''} onChange={(e) => setForm({ ...form, check_interval_minutes: Number(e.target.value) })} placeholder="同步间隔分钟" /><input type="number" value={form.sync_concurrency || ''} onChange={(e) => setForm({ ...form, sync_concurrency: Number(e.target.value) })} placeholder="并发" /><input type="number" value={form.sync_retry_count || ''} onChange={(e) => setForm({ ...form, sync_retry_count: Number(e.target.value) })} placeholder="重试" /><input value={form.notify_webhook_url || ''} onChange={(e) => setForm({ ...form, notify_webhook_url: e.target.value })} placeholder="Webhook URL" /><input value={form.database_url || ''} onChange={(e) => setForm({ ...form, database_url: e.target.value })} placeholder="DATABASE_URL" /><button className="primary" onClick={() => api('PUT', '/settings', form).then(() => { reload(); notify('设置已保存'); })}>保存</button></div></Panel>;
+}
+
+function Badge({ value }: { value: any }) {
+  return <span className={cx('badge', String(value).toLowerCase())}>{String(value || '-')}</span>;
+}
+
+createRoot(document.getElementById('root')!).render(<App />);

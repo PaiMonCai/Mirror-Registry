@@ -13,8 +13,8 @@ mirror_groups:
     registry: local
 
 mirrors:
-  - source: docker.io/library/nginx:latest
-    target: localhost:5000/library/nginx:latest
+  - source: docker.io/library/busybox:latest
+    target: localhost:5000/library/busybox:latest
     registry: local
     group: default
     project: default

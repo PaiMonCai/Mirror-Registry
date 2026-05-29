@@ -1,0 +1,23 @@
+{
+  "name": "mirror-registry-panel",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build --config frontend/vite.config.ts",
+    "typecheck": "tsc --project frontend/tsconfig.json"
+  },
+  "dependencies": {
+    "react": "latest",
+    "react-dom": "latest",
+    "lucide-react": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "@vitejs/plugin-react": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  }
+}

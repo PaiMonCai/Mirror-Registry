@@ -22,6 +22,7 @@ services:
       APP_VERSION: v4
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
+      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
     ports:
       - "8080:8080"
     volumes:
@@ -51,6 +52,7 @@ services:
       SKOPEO_DEST_TLS_VERIFY: ${SKOPEO_DEST_TLS_VERIFY:-false}
       SYNC_TARGET_REGISTRY: registry:5000
       COMMAND_TIMEOUT_SECONDS: 900
+      CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
     volumes:
       - ./config:/config:ro       # mirrors.yml（只读）
       - ./data:/data              # sync-state.json + sync.log + .trigger

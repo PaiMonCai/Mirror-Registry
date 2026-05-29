@@ -1,4 +1,6 @@
 import json
+import base64
+import hashlib
 import logging
 import os
 import shutil
@@ -15,6 +17,7 @@ from pathlib import Path
 
 import yaml
 from apscheduler.schedulers.blocking import BlockingScheduler
+from cryptography.fernet import Fernet, InvalidToken
 
 try:
     from sqlalchemy import create_engine, text
@@ -41,6 +44,7 @@ SKOPEO_SRC_TLS_VERIFY = os.getenv("SKOPEO_SRC_TLS_VERIFY", "true").lower()
 SKOPEO_DEST_TLS_VERIFY = os.getenv("SKOPEO_DEST_TLS_VERIFY", "false").lower()
 SKOPEO_AUTHFILE = os.getenv("SKOPEO_AUTHFILE", "").strip()
 SYNC_TARGET_REGISTRY = os.getenv("SYNC_TARGET_REGISTRY", "registry:5000").strip()
+CREDENTIALS_SECRET_KEY = os.getenv("CREDENTIALS_SECRET_KEY", "")
 LOCAL_REGISTRY_ALIASES = [
     item.strip()
     for item in os.getenv("LOCAL_REGISTRY_ALIASES", "localhost:5000,127.0.0.1:5000").split(",")
@@ -138,6 +142,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     resource_id TEXT NOT NULL,
     detail TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    registry_host TEXT NOT NULL,
+    username TEXT NOT NULL,
+    encrypted_secret TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -226,6 +241,18 @@ POSTGRES_SCHEMA_STATEMENTS = [
         resource_type VARCHAR(128) NOT NULL,
         resource_id VARCHAR(255) NOT NULL,
         detail TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS credentials (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        registry_host VARCHAR(255) NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        encrypted_secret TEXT NOT NULL,
+        scope VARCHAR(16) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
     )
     """,
 ]
@@ -368,6 +395,27 @@ def db_write(sql: str, params: tuple = ()) -> int:
     except sqlite3.Error as exc:
         logger.warning("SQLite 写入失败: %s", exc)
         return 0
+
+
+def db_rows(sql: str, params: tuple = ()) -> list[dict]:
+    if database_backend(DATABASE_URL) != "sqlite":
+        try:
+            engine = external_engine()
+            if database_backend(DATABASE_URL) == "mysql":
+                sql = mysql_compatible_sql(sql)
+            converted, bound = bind_sql(sql, params)
+            with engine.begin() as conn:
+                result = conn.execute(text(converted), bound)
+                return [dict(row._mapping) for row in result.fetchall()]
+        except Exception as exc:
+            logger.warning("外部数据库读取失败: %s", exc)
+            return []
+    try:
+        with connect_db() as conn:
+            return [dict(row) for row in conn.execute(sql, params).fetchall()]
+    except sqlite3.Error as exc:
+        logger.warning("SQLite 读取失败: %s", exc)
+        return []
 
 
 def runtime_value(key: str, default: str = "") -> str:
@@ -587,17 +635,119 @@ def valid_mirrors(config: dict) -> list[dict]:
                 "project": str(item.get("project") or group.get("project") or "default").strip() or "default",
                 "environment": str(item.get("environment") or group.get("environment") or "local").strip() or "local",
                 "namespace": str(item.get("namespace") or group.get("namespace") or "library").strip() or "library",
+                "source_credential_id": str(item.get("source_credential_id") or "").strip(),
+                "target_credential_id": str(item.get("target_credential_id") or "").strip(),
             }
         )
         upsert_mirror(source, target)
     return result
 
 
+def image_registry_host(value: str) -> str:
+    first = value.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first.lower()
+    return "docker.io"
+
+
+def credential_fernet() -> Fernet | None:
+    secret = CREDENTIALS_SECRET_KEY.strip()
+    if not secret:
+        return None
+    digest = hashlib.sha256(secret.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def decrypt_credential_secret(encrypted_secret: str) -> str:
+    fernet = credential_fernet()
+    if not fernet:
+        raise ValueError("CREDENTIALS_SECRET_KEY 未配置，无法解密仓库凭据")
+    try:
+        return fernet.decrypt(encrypted_secret.encode("ascii")).decode("utf-8")
+    except InvalidToken as exc:
+        raise ValueError("仓库凭据无法解密，请检查 CREDENTIALS_SECRET_KEY") from exc
+
+
+def load_credentials() -> list[dict]:
+    return db_rows(
+        """
+        SELECT id, registry_host, username, encrypted_secret, scope
+        FROM credentials
+        ORDER BY registry_host, id
+        """
+    )
+
+
+def credential_allows(row: dict, purpose: str) -> bool:
+    scope = str(row.get("scope") or "both").lower()
+    return scope == "both" or scope == purpose
+
+
+def find_credential(image: str, purpose: str, explicit_id: str = "", credentials: list[dict] | None = None) -> dict | None:
+    rows = credentials if credentials is not None else load_credentials()
+    if explicit_id:
+        for row in rows:
+            if row.get("id") == explicit_id and credential_allows(row, purpose):
+                return row
+        raise ValueError(f"{purpose} 凭据不存在或 scope 不匹配: {explicit_id}")
+    host = image_registry_host(image)
+    for row in rows:
+        if str(row.get("registry_host") or "").lower() == host and credential_allows(row, purpose):
+            return row
+    return None
+
+
+def auth_entry(row: dict) -> tuple[str, dict]:
+    secret = decrypt_credential_secret(str(row.get("encrypted_secret") or ""))
+    username = str(row.get("username") or "")
+    auth = base64.b64encode(f"{username}:{secret}".encode("utf-8")).decode("ascii")
+    return str(row.get("registry_host") or ""), {"username": username, "password": secret, "auth": auth}
+
+
+def write_temp_authfile(source_credential: dict | None, target_credential: dict | None) -> str:
+    auths = {}
+    for row in [source_credential, target_credential]:
+        if not row:
+            continue
+        host, entry = auth_entry(row)
+        auths[host] = entry
+    if not auths:
+        return ""
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False, suffix=".auth.json") as handle:
+        json.dump({"auths": auths}, handle)
+        handle.flush()
+        os.fsync(handle.fileno())
+        return handle.name
+
+
+def remove_temp_authfile(path: str) -> None:
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError as exc:
+        logger.warning("临时 authfile 清理失败: %s", exc)
+
+
+def redact_command(cmd: list[str]) -> str:
+    redacted = []
+    skip_next = False
+    for item in cmd:
+        if skip_next:
+            redacted.append("<authfile>")
+            skip_next = False
+            continue
+        redacted.append(item)
+        if item == "--authfile":
+            skip_next = True
+    return " ".join(redacted)
+
+
 def run_command(step_name: str, cmd: list[str], timeout: int = COMMAND_TIMEOUT_SECONDS) -> tuple[bool, str]:
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        message = f"{step_name} 超时（{timeout} 秒）: {' '.join(cmd)}"
+        message = f"{step_name} 超时（{timeout} 秒）: {redact_command(cmd)}"
         logger.error(message)
         return False, message
     except OSError as exc:
@@ -607,20 +757,26 @@ def run_command(step_name: str, cmd: list[str], timeout: int = COMMAND_TIMEOUT_S
 
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip()
-        message = f"{step_name} 失败 [{' '.join(cmd)}]: {stderr}"
+        message = f"{step_name} 失败 [{redact_command(cmd)}]: {stderr}"
         logger.error(message)
         return False, message
     return True, ""
 
 
-def inspect_remote_digest(image: str) -> tuple[str | None, str]:
+def build_skopeo_inspect_command(image: str, authfile: str = "") -> list[str]:
+    cmd = ["skopeo", "inspect", "--format", "{{.Digest}}"]
+    if authfile:
+        cmd.extend(["--authfile", authfile])
+    elif SKOPEO_AUTHFILE:
+        cmd.extend(["--authfile", SKOPEO_AUTHFILE])
+    cmd.append(f"docker://{image}")
+    return cmd
+
+
+def inspect_remote_digest(image: str, authfile: str = "") -> tuple[str | None, str]:
+    cmd = build_skopeo_inspect_command(image, authfile)
     try:
-        result = subprocess.run(
-            ["skopeo", "inspect", "--format", "{{.Digest}}", f"docker://{image}"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
         message = f"inspect 超时（60 秒）: {image}"
         logger.error(message)
@@ -652,7 +808,7 @@ def resolve_copy_target(target: str) -> str:
     return target
 
 
-def build_skopeo_copy_command(source: str, copy_target: str) -> list[str]:
+def build_skopeo_copy_command(source: str, copy_target: str, authfile: str = "") -> list[str]:
     cmd = [
         "skopeo",
         "copy",
@@ -661,7 +817,9 @@ def build_skopeo_copy_command(source: str, copy_target: str) -> list[str]:
     ]
     if SKOPEO_COPY_ALL:
         cmd.append("--all")
-    if SKOPEO_AUTHFILE:
+    if authfile:
+        cmd.extend(["--authfile", authfile])
+    elif SKOPEO_AUTHFILE:
         cmd.extend(["--authfile", SKOPEO_AUTHFILE])
     cmd.extend([f"docker://{source}", f"docker://{copy_target}"])
     return cmd
@@ -674,9 +832,9 @@ def get_target_lock(copy_target: str) -> threading.Lock:
         return target_locks[copy_target]
 
 
-def copy_image(source: str, target: str, retry_count: int | None = None) -> tuple[bool, str, str]:
+def copy_image(source: str, target: str, retry_count: int | None = None, authfile: str = "") -> tuple[bool, str, str]:
     copy_target = resolve_copy_target(target)
-    cmd = build_skopeo_copy_command(source, copy_target)
+    cmd = build_skopeo_copy_command(source, copy_target, authfile=authfile)
     attempts = bounded_int(retry_count if retry_count is not None else SYNC_RETRY_COUNT, SYNC_RETRY_COUNT, 0, 10) + 1
     with get_target_lock(copy_target):
         last_error = ""
@@ -805,57 +963,73 @@ def process_mirror(run_id: int, mirror: dict, state: dict, retry_count: int) -> 
         },
     )
 
-    remote, error = inspect_remote_digest(source)
-    if not remote:
-        logger.warning("跳过（无法获取 digest）: %s", source)
-        record_event("WARNING", f"无法获取 digest: {error}", run_id, source, target)
-        update_run_item(item_id, "failed", step="inspect", error=error, started_at_monotonic=started_at)
+    authfile = ""
+    try:
+        credentials = load_credentials()
+        source_credential = find_credential(source, "source", mirror.get("source_credential_id", ""), credentials)
+        target_credential = find_credential(resolve_copy_target(target), "target", mirror.get("target_credential_id", ""), credentials)
+        authfile = write_temp_authfile(source_credential, target_credential)
+    except ValueError as exc:
+        message = str(exc)
+        logger.warning("仓库凭据不可用: %s", message)
+        record_event("ERROR", f"仓库凭据不可用: {message}", run_id, source, target)
+        update_run_item(item_id, "failed", step="credentials", error=message, started_at_monotonic=started_at)
         return "failed"
 
-    if remote == cached:
-        logger.info("无更新: %s", source)
-        record_event("INFO", "digest 未变化，跳过同步", run_id, source, target)
-        update_run_item(item_id, "skipped", new_digest=remote, step="inspect", started_at_monotonic=started_at)
-        upsert_mirror(source, target, remote)
-        return "skipped"
+    try:
+        remote, error = inspect_remote_digest(source, authfile=authfile)
+        if not remote:
+            logger.warning("跳过（无法获取 digest）: %s", source)
+            record_event("WARNING", f"无法获取 digest: {error}", run_id, source, target)
+            update_run_item(item_id, "failed", step="inspect", error=error, started_at_monotonic=started_at)
+            return "failed"
 
-    short_old = (cached[:19] + "...") if cached else "新镜像"
-    short_new = remote[:19] + "..."
-    logger.info("发现更新: %s  %s -> %s", source, short_old, short_new)
-    record_event("INFO", f"发现更新: {short_old} -> {short_new}", run_id, source, target)
+        if remote == cached:
+            logger.info("无更新: %s", source)
+            record_event("INFO", "digest 未变化，跳过同步", run_id, source, target)
+            update_run_item(item_id, "skipped", new_digest=remote, step="inspect", started_at_monotonic=started_at)
+            upsert_mirror(source, target, remote)
+            return "skipped"
 
-    ok, copy_target, copy_error = copy_image(source, target, retry_count=retry_count)
-    if ok:
-        with state_lock:
-            state[source] = remote
-            save_state(state)
-        upsert_mirror(source, target, remote)
-        logger.info("同步完成: %s", target)
-        record_event("INFO", "同步完成", run_id, source, target)
-        audit_log("copy_success", "mirror", source, {"target": target, "copy_target": copy_target, "digest": remote})
+        short_old = (cached[:19] + "...") if cached else "新镜像"
+        short_new = remote[:19] + "..."
+        logger.info("发现更新: %s  %s -> %s", source, short_old, short_new)
+        record_event("INFO", f"发现更新: {short_old} -> {short_new}", run_id, source, target)
+
+        ok, copy_target, copy_error = copy_image(source, target, retry_count=retry_count, authfile=authfile)
+        if ok:
+            with state_lock:
+                state[source] = remote
+                save_state(state)
+            upsert_mirror(source, target, remote)
+            logger.info("同步完成: %s", target)
+            record_event("INFO", "同步完成", run_id, source, target)
+            audit_log("copy_success", "mirror", source, {"target": target, "copy_target": copy_target, "digest": remote})
+            update_run_item(
+                item_id,
+                "success",
+                new_digest=remote,
+                step="copy",
+                copy_target=copy_target,
+                started_at_monotonic=started_at,
+            )
+            return "updated"
+
+        logger.error("同步失败: %s -> %s，失败步骤: copy", source, target)
+        record_event("ERROR", f"同步失败: {copy_error}", run_id, source, target)
+        audit_log("copy_failed", "mirror", source, {"target": target, "error": copy_error})
         update_run_item(
             item_id,
-            "success",
+            "failed",
             new_digest=remote,
             step="copy",
+            error=copy_error,
             copy_target=copy_target,
             started_at_monotonic=started_at,
         )
-        return "updated"
-
-    logger.error("同步失败: %s -> %s，失败步骤: copy", source, target)
-    record_event("ERROR", f"同步失败: {copy_error}", run_id, source, target)
-    audit_log("copy_failed", "mirror", source, {"target": target, "error": copy_error})
-    update_run_item(
-        item_id,
-        "failed",
-        new_digest=remote,
-        step="copy",
-        error=copy_error,
-        copy_target=copy_target,
-        started_at_monotonic=started_at,
-    )
-    return "failed"
+        return "failed"
+    finally:
+        remove_temp_authfile(authfile)
 
 
 def normalize_sources(only_source: str | None = None, only_sources: list[str] | None = None) -> set[str]:

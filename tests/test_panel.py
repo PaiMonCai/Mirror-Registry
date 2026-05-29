@@ -7,6 +7,10 @@ from fastapi.testclient import TestClient
 
 @pytest.fixture()
 def panel_app(tmp_path, monkeypatch):
+    return make_panel_client(tmp_path, monkeypatch)
+
+
+def make_panel_client(tmp_path, monkeypatch, credentials_secret_key: str | None = "unit-secret-key"):
     config_path = tmp_path / "config" / "mirrors.yml"
     state_path = tmp_path / "data" / "sync-state.json"
     log_path = tmp_path / "data" / "sync.log"
@@ -30,6 +34,10 @@ def panel_app(tmp_path, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("PANEL_TOKEN", "test-token")
+    if credentials_secret_key is None:
+        monkeypatch.delenv("CREDENTIALS_SECRET_KEY", raising=False)
+    else:
+        monkeypatch.setenv("CREDENTIALS_SECRET_KEY", credentials_secret_key)
 
     import panel.main as panel_main
 
@@ -45,17 +53,17 @@ def test_status_and_mirror_crud(panel_app):
     assert client.post(
         "/api/mirrors",
         json={
-            "source": "docker.io/library/nginx:latest",
-            "target": "localhost:5000/library/nginx:latest",
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
         },
         headers=headers,
     ).status_code == 200
 
     mirrors = client.get("/api/mirrors").json()
-    assert mirrors[0]["source"] == "docker.io/library/nginx:latest"
-    assert "docker.io/library/nginx:latest" in config_path.read_text(encoding="utf-8")
+    assert mirrors[0]["source"] == "docker.io/library/busybox:latest"
+    assert "docker.io/library/busybox:latest" in config_path.read_text(encoding="utf-8")
 
-    state_path.write_text(json.dumps({"docker.io/library/nginx:latest": "sha256:abc"}), encoding="utf-8")
+    state_path.write_text(json.dumps({"docker.io/library/busybox:latest": "sha256:abc"}), encoding="utf-8")
     assert client.post("/api/mirrors/0/reset", headers=headers).status_code == 200
     assert json.loads(state_path.read_text(encoding="utf-8")) == {}
 
@@ -69,8 +77,8 @@ def test_write_routes_require_token(panel_app):
     response = client.post(
         "/api/mirrors",
         json={
-            "source": "docker.io/library/nginx:latest",
-            "target": "localhost:5000/library/nginx:latest",
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
         },
     )
 
@@ -93,8 +101,8 @@ def test_rejects_image_reference_without_tag(panel_app):
     response = client.post(
         "/api/mirrors",
         json={
-            "source": "docker.io/library/nginx",
-            "target": "localhost:5000/library/nginx:latest",
+            "source": "docker.io/library/busybox",
+            "target": "localhost:5000/library/busybox:latest",
         },
         headers={"Authorization": "Bearer test-token"},
     )
@@ -109,15 +117,15 @@ def test_single_mirror_sync_trigger_writes_source(panel_app):
     client.post(
         "/api/mirrors",
         json={
-            "source": "docker.io/library/nginx:latest",
-            "target": "localhost:5000/library/nginx:latest",
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
         },
         headers=headers,
     )
     response = client.post("/api/mirrors/0/sync", headers=headers)
 
     assert response.status_code == 200
-    assert "docker.io/library/nginx:latest" in trigger_path.read_text(encoding="utf-8")
+    assert "docker.io/library/busybox:latest" in trigger_path.read_text(encoding="utf-8")
 
 
 def test_diagnostics_and_sync_runs_are_available(panel_app):
@@ -158,8 +166,8 @@ def test_mirror_export_import(panel_app):
     payload = {
         "mirrors": [
             {
-                "source": "docker.io/library/nginx:latest",
-                "target": "localhost:5000/library/nginx:latest",
+                "source": "docker.io/library/busybox:latest",
+                "target": "localhost:5000/library/busybox:latest",
             }
         ],
         "replace": True,
@@ -169,7 +177,7 @@ def test_mirror_export_import(panel_app):
 
     assert response.status_code == 200
     exported = client.get("/api/mirrors/export").json()
-    assert exported["mirrors"][0]["source"] == "docker.io/library/nginx:latest"
+    assert exported["mirrors"][0]["source"] == "docker.io/library/busybox:latest"
     assert exported["version"] == 2
 
 
@@ -190,8 +198,8 @@ def test_retry_failed_run_writes_sources_trigger(panel_app):
         """,
         (
             run_id,
-            "docker.io/library/nginx:latest",
-            "localhost:5000/library/nginx:latest",
+            "docker.io/library/busybox:latest",
+            "localhost:5000/library/busybox:latest",
             "failed",
             panel_main.now_iso(),
         ),
@@ -202,7 +210,7 @@ def test_retry_failed_run_writes_sources_trigger(panel_app):
     assert response.status_code == 200
     trigger = json.loads(trigger_path.read_text(encoding="utf-8"))
     assert trigger["reason"] == "retry-run"
-    assert trigger["sources"] == ["docker.io/library/nginx:latest"]
+    assert trigger["sources"] == ["docker.io/library/busybox:latest"]
 
 
 def test_storage_delete_mark_and_security_guide(panel_app):
@@ -211,13 +219,13 @@ def test_storage_delete_mark_and_security_guide(panel_app):
 
     response = client.post(
         "/api/storage/delete-mark",
-        json={"repo": "library/nginx", "tag": "latest", "reason": "cleanup"},
+        json={"repo": "library/busybox", "tag": "latest", "reason": "cleanup"},
         headers=headers,
     )
 
     assert response.status_code == 200
     storage = client.get("/api/storage").json()
-    assert storage["deletion_marks"][0]["repo"] == "library/nginx"
+    assert storage["deletion_marks"][0]["repo"] == "library/busybox"
     assert "garbage-collect" in "\n".join(storage["garbage_collection"]["commands"])
     assert client.get("/api/security-guide").json()["recommended"]
 
@@ -246,8 +254,8 @@ def test_v4_registry_group_platform_and_audit(panel_app):
     mirror_response = client.post(
         "/api/mirrors",
         json={
-            "source": "docker.io/library/nginx:latest",
-            "target": "registry.example.com/library/nginx:latest",
+            "source": "docker.io/library/busybox:latest",
+            "target": "registry.example.com/library/busybox:latest",
             "registry": "prod",
             "group": "prod-app",
             "project": "app",
@@ -287,3 +295,98 @@ def test_v4_database_configuration_guide(panel_app):
     assert settings["database_backend"] == "postgresql"
     assert guide["supported_backends"] == ["sqlite", "postgresql", "mysql"]
     assert any(item["name"] == "数据库后端" for item in diagnostics["checks"])
+
+
+def test_credentials_crud_test_and_secret_redaction(panel_app, monkeypatch):
+    client, config_path, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    create = client.post(
+        "/api/credentials",
+        json={
+            "id": "dockerhub",
+            "name": "Docker Hub",
+            "registry_host": "https://index.docker.io",
+            "username": "alice",
+            "secret": "top-secret",
+            "scope": "both",
+        },
+        headers=headers,
+    )
+
+    assert create.status_code == 200
+    listed = client.get("/api/credentials").json()
+    assert listed[0]["id"] == "dockerhub"
+    assert listed[0]["registry_host"] == "index.docker.io"
+    assert listed[0]["configured"] is True
+    assert "secret" not in json.dumps(listed)
+
+    import panel.main as panel_main
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, auth):
+            assert url == "https://index.docker.io/v2/"
+            assert auth == ("alice", "top-secret")
+            return type("Response", (), {"status_code": 200})()
+
+    monkeypatch.setattr(panel_main.httpx, "AsyncClient", FakeAsyncClient)
+    test_response = client.post("/api/credentials/dockerhub/test", json={}, headers=headers)
+    assert test_response.status_code == 200
+    assert test_response.json()["status"] == "ok"
+
+    update = client.put(
+        "/api/credentials/dockerhub",
+        json={
+            "name": "Docker Hub Read",
+            "registry_host": "index.docker.io",
+            "username": "alice",
+            "scope": "source",
+        },
+        headers=headers,
+    )
+    assert update.status_code == 200
+    assert update.json()["credential"]["scope"] == "source"
+
+    audit = client.get("/api/audit-logs").json()
+    assert "top-secret" not in json.dumps(audit)
+    assert "alice" not in json.dumps(audit)
+
+    client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:latest",
+            "source_credential_id": "dockerhub",
+        },
+        headers=headers,
+    )
+    assert "source_credential_id: dockerhub" in config_path.read_text(encoding="utf-8")
+    assert client.delete("/api/credentials/dockerhub", headers=headers).status_code == 400
+
+
+def test_credentials_require_secret_key(tmp_path, monkeypatch):
+    client, _, _, _ = make_panel_client(tmp_path, monkeypatch, credentials_secret_key=None)
+    response = client.post(
+        "/api/credentials",
+        json={
+            "id": "missing-key",
+            "name": "Missing Key",
+            "registry_host": "ghcr.io",
+            "username": "alice",
+            "secret": "top-secret",
+        },
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert response.status_code == 400
+    diagnostics = client.post("/api/diagnostics/run").json()
+    assert any(item["name"] == "仓库凭据密钥" and item["status"] == "warn" for item in diagnostics["checks"])

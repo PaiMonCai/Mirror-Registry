@@ -37,6 +37,17 @@ def require_paths() -> None:
         "panel/.dockerignore",
         "panel/Dockerfile",
         "panel/main.py",
+        "package.json",
+        "package-lock.json",
+        "panel/package.json",
+        "panel/package-lock.json",
+        "panel/frontend/index.html",
+        "panel/frontend/vite.config.ts",
+        "panel/frontend/tsconfig.json",
+        "panel/frontend/src/api.ts",
+        "panel/frontend/src/main.tsx",
+        "panel/frontend/src/styles.css",
+        "panel/frontend/src/vite-env.d.ts",
         "panel/requirements.txt",
         "panel/static/index.html",
         "sync/__init__.py",
@@ -100,6 +111,7 @@ def require_compose_shape() -> None:
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
+        "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in compose]
     if missing:
@@ -136,6 +148,7 @@ def require_compose_shape() -> None:
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
         "COMMAND_TIMEOUT_SECONDS: 900",
+        "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
     ]
     missing_dev = [snippet for snippet in dev_required_snippets if snippet not in dev_compose]
     if missing_dev:
@@ -149,12 +162,16 @@ def require_compose_shape() -> None:
 def require_dockerfile_contexts() -> None:
     checks = {
         "panel": {
-            "required": ["requirements.txt", "main.py", "static/index.html"],
+            "required": ["requirements.txt", "main.py", "package.json", "frontend/index.html", "frontend/src/main.tsx"],
             "dockerfile_snippets": [
+                "FROM node:24-slim AS frontend",
+                "RUN npm ci",
+                "COPY frontend/ frontend/",
+                "RUN npm run build",
                 "FROM python:3.12-slim",
                 "COPY requirements.txt .",
                 "COPY main.py .",
-                "COPY static/ static/",
+                "COPY --from=frontend /panel/static/ static/",
                 'CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]',
             ],
             "requirements": [
@@ -165,6 +182,7 @@ def require_dockerfile_contexts() -> None:
                 "sqlalchemy==2.0.30",
                 "pymysql==1.1.1",
                 "psycopg[binary]==3.1.19",
+                "cryptography==42.0.8",
             ],
         },
         "sync": {
@@ -182,6 +200,7 @@ def require_dockerfile_contexts() -> None:
                 "sqlalchemy==2.0.30",
                 "pymysql==1.1.1",
                 "psycopg[binary]==3.1.19",
+                "cryptography==42.0.8",
             ],
         },
     }
@@ -212,8 +231,8 @@ def require_config_shape() -> None:
         "mirrors:",
         "registries:",
         "mirror_groups:",
-        "source: docker.io/library/nginx:latest",
-        "target: localhost:5000/library/nginx:latest",
+        "source: docker.io/library/busybox:latest",
+        "target: localhost:5000/library/busybox:latest",
         "registry: local",
         "group: default",
         "project: default",
@@ -265,6 +284,12 @@ def require_panel_features() -> None:
         "list_audit_logs",
         "get_database_guide",
         "audit_log",
+        "create_credential",
+        "update_credential",
+        "delete_credential",
+        "test_credential",
+        "encrypt_secret",
+        "decrypt_secret",
     ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
@@ -308,6 +333,10 @@ def require_panel_features() -> None:
         "mirror_groups",
         "audit_logs",
         "database_backend",
+        "CREDENTIALS_SECRET_KEY",
+        "credentials",
+        "@app.get(\"/api/credentials\")",
+        "@app.post(\"/api/credentials\"",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -342,6 +371,11 @@ def require_sync_features() -> None:
         "cleanup_local_tags",
         "sync_all",
         "check_trigger",
+        "load_credentials",
+        "find_credential",
+        "write_temp_authfile",
+        "remove_temp_authfile",
+        "build_skopeo_inspect_command",
     ]:
         if name not in function_names:
             fail(f"sync/sync.py missing function {name}")
@@ -378,6 +412,10 @@ def require_sync_features() -> None:
         "mirror_group_count",
         "target_locks",
         "parse_trigger",
+        "CREDENTIALS_SECRET_KEY",
+        "credentials",
+        "--authfile",
+        "redact_command",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -390,27 +428,27 @@ def require_sync_features() -> None:
 
 
 def require_frontend_features() -> None:
-    source = read("panel/static/index.html")
+    source = read("panel/frontend/src/main.tsx")
+    api_source = read("panel/frontend/src/api.ts")
+    package_json = read("panel/package.json")
+    static_index = read("panel/static/index.html")
     required_snippets = [
-        'id="tokenInput"',
+        "React",
+        "createRoot",
+        "createApiClient",
         "mirrorRegistryTheme",
-        "localStorage.getItem('mirrorRegistryToken')",
-        "opts.headers.Authorization = 'Bearer ' + writeToken",
-        "function saveToken()",
-        "function loadDiagnostics()",
-        "function loadRuns()",
-        "function retryRun(",
-        "function retryRunItem(",
-        "function exportMirrors()",
-        "function importMirrors(",
-        "function loadStorage()",
-        "function markDelete(",
-        "function loadSecurityGuide()",
-        "function loadPlatform()",
-        "function saveRegistry()",
-        "function saveMirrorGroup()",
-        "function loadAuditLogs()",
-        "function loadDatabaseGuide()",
+        "mirrorRegistryToken",
+        "loadDiagnostics",
+        "loadRuns",
+        "loadStorage",
+        "loadSecurity",
+        "loadPlatform",
+        "loadAudit",
+        "loadSettings",
+        "loadCredentials",
+        "source_credential_id",
+        "target_credential_id",
+        "/credentials",
         "sync_concurrency",
         "Webhook URL",
         "平台配置",
@@ -419,8 +457,6 @@ def require_frontend_features() -> None:
         "删除标记",
         "垃圾回收",
         "公网暴露安全边界",
-        "function toggleTheme()",
-        "function esc(",
         "验证诊断",
         "同步任务",
         "using_default_token",
@@ -429,10 +465,27 @@ def require_frontend_features() -> None:
     if missing:
         fail(f"panel frontend missing snippets: {missing}")
 
-    unsafe_interpolations = re.findall(r"\$\{(m\.source|m\.target|m\.digest|img\.repo|t|line|e\.message)\}", source)
-    if unsafe_interpolations:
-        fail(f"dynamic frontend fields must pass through esc(): {unsafe_interpolations}")
-    ok("panel frontend sends write token and keeps dynamic text escaped")
+    for snippet in [
+        "Authorization",
+        "Bearer",
+        "Content-Type",
+        "ApiError",
+    ]:
+        if snippet not in api_source:
+            fail(f"panel API client missing {snippet!r}")
+    for snippet in [
+        '"vite"',
+        '"typescript"',
+        '"react"',
+        '"react-dom"',
+        '"lucide-react"',
+        '"build"',
+    ]:
+        if snippet not in package_json:
+            fail(f"panel/package.json missing {snippet!r}")
+    if '<div id="root"></div>' not in static_index:
+        fail("Vite build output is not present in panel/static/index.html")
+    ok("React/Vite frontend sends write token through centralized API client")
 
 
 def require_tests_and_docs() -> None:
@@ -454,6 +507,9 @@ def require_tests_and_docs() -> None:
         "valid_mirrors",
         "build_skopeo_copy_command",
         "parse_trigger",
+        "/api/credentials",
+        "write_temp_authfile",
+        "CREDENTIALS_SECRET_KEY",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -522,6 +578,7 @@ def require_tests_and_docs() -> None:
         "DISK_LOW_BYTES=2147483648",
         "NOTIFY_WEBHOOK_URL=",
         "SKOPEO_COPY_ALL=1",
+        "CREDENTIALS_SECRET_KEY=",
     ]:
         if snippet not in env_example:
             fail(f".env.example missing {snippet!r}")
@@ -535,6 +592,7 @@ def require_tests_and_docs() -> None:
         "python -m pytest",
         "docker compose config",
         "docker compose -f docker-compose.dev.yml config",
+        "npm.cmd run build",
     ]:
         if snippet not in check_script:
             fail(f"scripts/check-runtime.ps1 missing {snippet!r}")

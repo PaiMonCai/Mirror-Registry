@@ -39,6 +39,7 @@ DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
+CREDENTIALS_SECRET_KEY=
 ```
 
 `MIRROR_REGISTRY_IMAGE_TAG` defaults to `latest`. To pin a release, set it to a specific tag:
@@ -48,6 +49,15 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 ```
 
 The panel stores the token in browser local storage and sends it as a Bearer token for write operations.
+
+## Frontend Engineering and Registry Credentials
+
+- The panel frontend is built with React + Vite + TypeScript, and FastAPI continues to serve the built static files.
+- After frontend edits, run `npm.cmd run build`; production image builds run a Node build stage while the runtime image stays Python-only.
+- The Credentials page stores source and target registry username + token/password pairs encrypted.
+- Credentials support host defaults and per-mirror overrides. Matching priority is mirror override > host default > no credential.
+- Production deployments must set `CREDENTIALS_SECRET_KEY` before saving credentials. Secrets are not echoed, exported in plaintext, logged, or written into audit detail.
+- The sync worker creates a temporary authfile for `skopeo inspect/copy` and removes it after the command finishes.
 
 ## v3 Management
 
@@ -90,8 +100,8 @@ Edit `config/mirrors.yml` or use the panel:
 
 ```yaml
 mirrors:
-  - source: docker.io/library/nginx:latest
-    target: localhost:5000/library/nginx:latest
+  - source: docker.io/library/busybox:latest
+    target: localhost:5000/library/busybox:latest
     registry: local
     group: default
     project: default
@@ -128,6 +138,7 @@ docker compose up -d registry
 python -m pip install -r requirements-dev.txt
 python scripts\verify.py
 .\scripts\check-runtime.ps1
+npm.cmd run build
 python -m pytest
 docker compose config
 docker compose -f docker-compose.dev.yml config

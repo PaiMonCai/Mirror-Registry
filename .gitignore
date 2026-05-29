@@ -2,6 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .venv/
+node_modules/
+panel/node_modules/
 
 # Local development docs
 mirror-registry-dev-doc*.md

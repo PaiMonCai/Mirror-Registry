@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
@@ -12,6 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 import yaml
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -34,6 +37,7 @@ REGISTRY_STORAGE_PATH = Path(os.getenv("REGISTRY_STORAGE_PATH", "/data/registry"
 PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
 APP_VERSION = os.getenv("APP_VERSION", "v4")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
+CREDENTIALS_SECRET_KEY = os.getenv("CREDENTIALS_SECRET_KEY", "")
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", "/panel/static"))
 if not STATIC_DIR.exists():
@@ -55,6 +59,8 @@ class MirrorIn(BaseModel):
     project: str = Field(default="default", min_length=1, max_length=64)
     environment: str = Field(default="local", min_length=1, max_length=64)
     namespace: str = Field(default="library", min_length=1, max_length=128)
+    source_credential_id: str | None = Field(default=None, max_length=64)
+    target_credential_id: str | None = Field(default=None, max_length=64)
 
 
 class MirrorImportIn(BaseModel):
@@ -70,6 +76,19 @@ class RegistryIn(BaseModel):
     url: str = Field(min_length=1, max_length=500)
     copy_host: str | None = Field(default=None, max_length=255)
     storage_path: str | None = Field(default=None, max_length=500)
+
+
+class CredentialIn(BaseModel):
+    id: str | None = Field(default=None, max_length=64)
+    name: str = Field(min_length=1, max_length=120)
+    registry_host: str = Field(min_length=1, max_length=255)
+    username: str = Field(min_length=1, max_length=255)
+    secret: str | None = Field(default=None, max_length=2000)
+    scope: str = Field(default="both", max_length=16)
+
+
+class CredentialTestIn(BaseModel):
+    registry_url: str | None = Field(default=None, max_length=500)
 
 
 class MirrorGroupIn(BaseModel):
@@ -190,6 +209,17 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     resource_id TEXT NOT NULL,
     detail TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS credentials (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    registry_host TEXT NOT NULL,
+    username TEXT NOT NULL,
+    encrypted_secret TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -278,6 +308,18 @@ POSTGRES_SCHEMA_STATEMENTS = [
         resource_type VARCHAR(128) NOT NULL,
         resource_id VARCHAR(255) NOT NULL,
         detail TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS credentials (
+        id VARCHAR(64) PRIMARY KEY,
+        name VARCHAR(120) NOT NULL,
+        registry_host VARCHAR(255) NOT NULL,
+        username VARCHAR(255) NOT NULL,
+        encrypted_secret TEXT NOT NULL,
+        scope VARCHAR(16) NOT NULL,
+        created_at VARCHAR(64) NOT NULL,
+        updated_at VARCHAR(64) NOT NULL
     )
     """,
 ]
@@ -412,6 +454,27 @@ def audit_log(action: str, resource_type: str, resource_id: str, detail: dict | 
     )
 
 
+def credential_row(credential_id: str) -> dict:
+    clean_id = validate_slug(credential_id, "credential_id")
+    row = db_one(
+        "SELECT id, name, registry_host, username, encrypted_secret, scope, created_at, updated_at FROM credentials WHERE id = ?",
+        (clean_id,),
+    )
+    if not row:
+        raise HTTPException(404, "凭据不存在")
+    return row
+
+
+def mirror_credential_references(config: dict, credential_id: str) -> list[str]:
+    refs = []
+    for mirror in valid_mirrors(config):
+        if mirror.get("source_credential_id") == credential_id:
+            refs.append(f"{mirror['source']} source")
+        if mirror.get("target_credential_id") == credential_id:
+            refs.append(f"{mirror['source']} target")
+    return refs
+
+
 def runtime_state() -> dict:
     rows = db_rows("SELECT key, value, updated_at FROM runtime_state")
     return {row["key"]: {"value": row["value"], "updated_at": row["updated_at"]} for row in rows}
@@ -495,6 +558,84 @@ def validate_slug(value: str, field_name: str) -> str:
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$", slug):
         raise HTTPException(400, f"{field_name} 只能包含字母、数字、点、下划线和短横线")
     return slug
+
+
+def slug_candidate(value: str, default: str = "credential") -> str:
+    candidate = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip(".-_")
+    if not candidate:
+        candidate = default
+    if not re.match(r"^[A-Za-z0-9]", candidate):
+        candidate = f"{default}-{candidate}"
+    return candidate[:64]
+
+
+def optional_slug(value: str | None, field_name: str) -> str:
+    if value is None:
+        return ""
+    clean = str(value).strip()
+    return validate_slug(clean, field_name) if clean else ""
+
+
+def image_registry_host(value: str) -> str:
+    first = value.split("/", 1)[0]
+    if "." in first or ":" in first or first == "localhost":
+        return first
+    return "docker.io"
+
+
+def normalize_registry_host(value: str) -> str:
+    raw = value.strip()
+    if not raw:
+        raise HTTPException(400, "registry_host 不能为空")
+    if "://" in raw:
+        parsed = urlparse(raw)
+        if not parsed.netloc:
+            raise HTTPException(400, "registry_host 格式不合法")
+        return parsed.netloc.lower()
+    return image_registry_host(raw).lower() if "/" in raw else raw.lower()
+
+
+def validate_credential_scope(value: str) -> str:
+    scope = value.strip().lower() or "both"
+    if scope not in {"source", "target", "both"}:
+        raise HTTPException(400, "scope 必须是 source、target 或 both")
+    return scope
+
+
+def require_credentials_secret() -> str:
+    secret = CREDENTIALS_SECRET_KEY.strip()
+    if not secret:
+        raise HTTPException(400, "保存仓库凭据前必须设置 CREDENTIALS_SECRET_KEY")
+    return secret
+
+
+def credential_fernet() -> Fernet:
+    digest = hashlib.sha256(require_credentials_secret().encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def encrypt_secret(secret: str) -> str:
+    return credential_fernet().encrypt(secret.encode("utf-8")).decode("ascii")
+
+
+def decrypt_secret(encrypted_secret: str) -> str:
+    try:
+        return credential_fernet().decrypt(encrypted_secret.encode("ascii")).decode("utf-8")
+    except InvalidToken as exc:
+        raise HTTPException(400, "凭据无法解密，请检查 CREDENTIALS_SECRET_KEY") from exc
+
+
+def public_credential(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "registry_host": row["registry_host"],
+        "username": row["username"],
+        "scope": row["scope"],
+        "configured": bool(row.get("encrypted_secret")),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
 
 
 def validate_registry_url(value: str) -> str:
@@ -588,6 +729,8 @@ def normalize_mirror(item: dict, groups: dict[str, dict] | None = None) -> dict:
         "project": validate_slug(str(item.get("project") or group.get("project") or "default"), "project"),
         "environment": validate_slug(str(item.get("environment") or group.get("environment") or "local"), "environment"),
         "namespace": str(item.get("namespace") or group.get("namespace") or "library").strip() or "library",
+        "source_credential_id": optional_slug(item.get("source_credential_id"), "source_credential_id"),
+        "target_credential_id": optional_slug(item.get("target_credential_id"), "target_credential_id"),
     }
 
 
@@ -612,6 +755,8 @@ def valid_mirrors(config: dict) -> list[dict]:
                         "project": "default",
                         "environment": "local",
                         "namespace": "library",
+                        "source_credential_id": "",
+                        "target_credential_id": "",
                     }
                 )
     return result
@@ -1253,6 +1398,14 @@ async def run_diagnostics() -> dict:
             details={"notify_webhook_configured": settings["notify_webhook_configured"]},
         )
     )
+    checks.append(
+        diagnostic_item(
+            "仓库凭据密钥",
+            "ok" if CREDENTIALS_SECRET_KEY.strip() else "warn",
+            "CREDENTIALS_SECRET_KEY 已配置" if CREDENTIALS_SECRET_KEY.strip() else "未配置 CREDENTIALS_SECRET_KEY，不能保存加密仓库凭据",
+            "生产环境保存仓库凭据前必须设置 CREDENTIALS_SECRET_KEY",
+        )
+    )
 
     external_db = external_database_guide()
     checks.append(
@@ -1478,6 +1631,104 @@ def list_grouped_mirrors():
 @app.get("/api/registries")
 def list_registries():
     return list(registry_map(load_config()).values())
+
+
+@app.get("/api/credentials")
+def list_credentials():
+    rows = db_rows(
+        """
+        SELECT id, name, registry_host, username, encrypted_secret, scope, created_at, updated_at
+        FROM credentials
+        ORDER BY registry_host, name
+        """
+    )
+    return [public_credential(row) for row in rows]
+
+
+@app.post("/api/credentials", dependencies=[Depends(require_write_token)])
+def create_credential(body: CredentialIn):
+    require_credentials_secret()
+    if not body.secret:
+        raise HTTPException(400, "创建凭据时必须填写 secret")
+    registry_host = normalize_registry_host(body.registry_host)
+    credential_id = validate_slug(body.id or slug_candidate(f"{registry_host.replace(':', '-')}-{body.name}"), "credential_id")
+    existing = db_one("SELECT id FROM credentials WHERE id = ?", (credential_id,))
+    if existing:
+        raise HTTPException(409, "凭据 id 已存在")
+    now = now_iso()
+    encrypted = encrypt_secret(body.secret)
+    scope = validate_credential_scope(body.scope)
+    db_execute(
+        """
+        INSERT INTO credentials(id, name, registry_host, username, encrypted_secret, scope, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (credential_id, body.name.strip(), registry_host, body.username.strip(), encrypted, scope, now, now),
+    )
+    row = credential_row(credential_id)
+    audit_log("create", "credential", credential_id, {"registry_host": registry_host, "scope": scope})
+    return {"ok": True, "credential": public_credential(row)}
+
+
+@app.put("/api/credentials/{credential_id}", dependencies=[Depends(require_write_token)])
+def update_credential(credential_id: str, body: CredentialIn):
+    require_credentials_secret()
+    current = credential_row(credential_id)
+    registry_host = normalize_registry_host(body.registry_host)
+    scope = validate_credential_scope(body.scope)
+    encrypted = encrypt_secret(body.secret) if body.secret else current["encrypted_secret"]
+    db_execute(
+        """
+        UPDATE credentials
+        SET name = ?, registry_host = ?, username = ?, encrypted_secret = ?, scope = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (body.name.strip(), registry_host, body.username.strip(), encrypted, scope, now_iso(), current["id"]),
+    )
+    row = credential_row(current["id"])
+    audit_log("update", "credential", current["id"], {"registry_host": registry_host, "scope": scope, "secret_updated": bool(body.secret)})
+    return {"ok": True, "credential": public_credential(row)}
+
+
+@app.delete("/api/credentials/{credential_id}", dependencies=[Depends(require_write_token)])
+def delete_credential(credential_id: str):
+    row = credential_row(credential_id)
+    refs = mirror_credential_references(load_config(), row["id"])
+    if refs:
+        raise HTTPException(400, f"凭据仍被镜像引用: {', '.join(refs[:5])}")
+    db_execute("DELETE FROM credentials WHERE id = ?", (row["id"],))
+    audit_log("delete", "credential", row["id"], {"registry_host": row["registry_host"], "scope": row["scope"]})
+    return {"ok": True}
+
+
+@app.post("/api/credentials/{credential_id}/test", dependencies=[Depends(require_write_token)])
+async def test_credential(credential_id: str, body: CredentialTestIn | None = None):
+    row = credential_row(credential_id)
+    secret = decrypt_secret(row["encrypted_secret"])
+    registry_url = (body.registry_url if body else None) or f"https://{row['registry_host']}"
+    registry_url = registry_url.strip().rstrip("/")
+    if "://" not in registry_url:
+        registry_url = f"https://{registry_url}"
+    parsed = urlparse(registry_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(400, "registry_url 必须是 http:// 或 https:// 地址")
+    check_url = f"{registry_url}/v2/"
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            response = await client.get(check_url, auth=(row["username"], secret))
+    except httpx.ConnectError as exc:
+        audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "reason": "network"})
+        return {"ok": False, "status": "network_error", "message": f"无法连接 Registry: {exc.__class__.__name__}"}
+    except httpx.TimeoutException:
+        audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "reason": "timeout"})
+        return {"ok": False, "status": "timeout", "message": "连接 Registry 超时"}
+    if response.status_code in {200, 401, 403}:
+        ok = response.status_code == 200
+        status = "ok" if ok else ("authentication_failed" if response.status_code == 401 else "permission_denied")
+        audit_log("test_ok" if ok else "test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "status": status})
+        return {"ok": ok, "status": status, "http_status": response.status_code}
+    audit_log("test_failed", "credential", row["id"], {"registry_host": row["registry_host"], "status": "registry_error", "http_status": response.status_code})
+    return {"ok": False, "status": "registry_error", "http_status": response.status_code}
 
 
 @app.post("/api/registries", dependencies=[Depends(require_write_token)])
