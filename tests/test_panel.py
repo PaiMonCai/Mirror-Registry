@@ -1019,6 +1019,104 @@ def test_ops_summary_explains_recent_failures_and_risk_flags(panel_app):
     assert "tag" in failure["explanation"]["suggestion"]
 
 
+def test_observability_summary_aggregates_windows_failures_and_alerts(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    import panel.main as panel_main
+
+    now = panel_main.now_iso()
+    panel_main.db_execute(
+        """
+        INSERT INTO runtime_state(key, value, updated_at)
+        VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?)
+        """,
+        (
+            "last_heartbeat",
+            now,
+            now,
+            "disk_low",
+            "true",
+            now,
+            "disk_free_bytes",
+            "123456",
+            now,
+            "notify_last_sent_event",
+            "sync_failed",
+            now,
+        ),
+    )
+    completed_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, ended_at, total, updated, skipped, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("manual", "completed", None, now, now, 2, 1, 1, 0),
+    )
+    first_failed_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, ended_at, total, updated, skipped, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("manual", "failed", None, now, now, 1, 0, 0, 1),
+    )
+    latest_failed_id = panel_main.db_execute(
+        "INSERT INTO sync_runs(reason, status, only_source, started_at, ended_at, total, updated, skipped, failed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("scheduled", "failed", None, now, now, 1, 0, 0, 1),
+    )
+    for run_id, source, error in [
+        (first_failed_id, "docker.io/library/missing:1.0.0", "manifest unknown: requested image not found"),
+        (latest_failed_id, "ghcr.io/acme/app:1.0.0", "x509 certificate signed by unknown authority"),
+    ]:
+        panel_main.db_execute(
+            """
+            INSERT INTO sync_run_items(run_id, source, target, copy_target, status, step, error, started_at, ended_at, duration_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                source,
+                f"localhost:5000/{source.split('/', 1)[1]}",
+                f"registry:5000/{source.split('/', 1)[1]}",
+                "failed",
+                "copy",
+                error,
+                now,
+                now,
+                1000,
+            ),
+        )
+    panel_main.db_execute(
+        """
+        INSERT INTO sync_run_items(run_id, source, target, status, step, started_at, ended_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (completed_id, "docker.io/library/busybox:latest", "localhost:5000/library/busybox:latest", "success", "copy", now, now),
+    )
+    client.post(
+        "/api/storage/delete-mark",
+        json={"repo": "library/busybox", "tag": "old", "reason": "cleanup"},
+        headers=headers,
+    )
+
+    response = client.get("/api/observability/summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["health"] == "error"
+    assert data["windows"]["24h"]["total_runs"] == 3
+    assert data["windows"]["24h"]["completed_runs"] == 1
+    assert data["windows"]["24h"]["failed_runs"] == 2
+    assert data["windows"]["24h"]["success_rate"] == 0.3333
+    assert data["windows"]["7d"]["failed_items"] == 2
+    assert data["metrics"]["sync_success_rate_24h"] == 0.3333
+    assert data["metrics"]["storage_deletion_marks"] == 1
+    assert data["storage"]["disk_low"] is True
+    assert data["runtime"]["last_heartbeat"] == now
+    alert_ids = {item["id"] for item in data["alerts"]}
+    assert {"disk_low", "consecutive_sync_failures", "pending_deletion_marks"}.issubset(alert_ids)
+    categories = {item["category"] for item in data["failure_breakdown"]}
+    assert {"manifest", "tls"}.issubset(categories)
+    assert data["trend"]
+    metrics = client.get("/api/observability/metrics").json()
+    assert metrics["metrics"]["observability_active_alerts"] == len(data["alerts"])
+    assert metrics["alerts"][0]["fingerprint"]
+
+
 def test_diagnostic_bundle_redacts_secrets_and_includes_ops_context(panel_app, monkeypatch):
     client, _, _, _ = panel_app
     headers = {"Authorization": "Bearer test-token"}

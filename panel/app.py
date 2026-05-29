@@ -1878,6 +1878,339 @@ def deletion_mark_count() -> int:
     return int(row.get("count") or 0) if row else 0
 
 
+def parse_observability_time(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    parsed = parse_iso(str(value))
+    if parsed == datetime.min.replace(tzinfo=timezone.utc):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def sync_run_rows_since(hours: int) -> list[dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0)
+    return db_rows(
+        """
+        SELECT id, reason, status, only_source, started_at, ended_at, total, updated, skipped, failed, message
+        FROM sync_runs
+        WHERE started_at >= ?
+        ORDER BY started_at ASC, id ASC
+        """,
+        (cutoff.isoformat(),),
+    )
+
+
+def build_sync_window_stats(hours: int) -> dict:
+    rows = sync_run_rows_since(hours)
+    terminal_rows = [row for row in rows if row.get("status") in {"completed", "failed"}]
+    completed = sum(1 for row in rows if row.get("status") == "completed")
+    failed = sum(1 for row in rows if row.get("status") == "failed")
+    running = sum(1 for row in rows if row.get("status") == "running")
+    terminal_count = len(terminal_rows)
+    return {
+        "window_hours": hours,
+        "total_runs": len(rows),
+        "completed_runs": completed,
+        "failed_runs": failed,
+        "running_runs": running,
+        "success_rate": round(completed / terminal_count, 4) if terminal_count else None,
+        "total_items": sum(int(row.get("total") or 0) for row in rows),
+        "updated_items": sum(int(row.get("updated") or 0) for row in rows),
+        "skipped_items": sum(int(row.get("skipped") or 0) for row in rows),
+        "failed_items": sum(int(row.get("failed") or 0) for row in rows),
+        "last_started_at": rows[-1].get("started_at") if rows else "",
+    }
+
+
+def bucket_start_iso(value: str | None, bucket_hours: int) -> str | None:
+    parsed = parse_observability_time(value)
+    if not parsed:
+        return None
+    bucket_seconds = max(1, bucket_hours) * 3600
+    bucket_epoch = int(parsed.timestamp()) // bucket_seconds * bucket_seconds
+    return datetime.fromtimestamp(bucket_epoch, timezone.utc).replace(microsecond=0).isoformat()
+
+
+def build_sync_trend(hours: int = 24, bucket_hours: int = 1) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for row in sync_run_rows_since(hours):
+        bucket = bucket_start_iso(row.get("started_at"), bucket_hours)
+        if not bucket:
+            continue
+        entry = buckets.setdefault(
+            bucket,
+            {"bucket_start": bucket, "total_runs": 0, "completed_runs": 0, "failed_runs": 0, "failed_items": 0},
+        )
+        entry["total_runs"] += 1
+        if row.get("status") == "completed":
+            entry["completed_runs"] += 1
+        if row.get("status") == "failed":
+            entry["failed_runs"] += 1
+        entry["failed_items"] += int(row.get("failed") or 0)
+    return [buckets[key] for key in sorted(buckets)]
+
+
+def build_disk_trend() -> list[dict]:
+    runtime = runtime_state()
+    disk_free = runtime.get("disk_free_bytes", {})
+    disk_total = runtime.get("disk_total_bytes", {})
+    if not disk_free.get("value"):
+        return []
+    return [
+        {
+            "recorded_at": disk_free.get("updated_at"),
+            "disk_free_bytes": disk_free.get("value"),
+            "disk_total_bytes": disk_total.get("value"),
+        }
+    ]
+
+
+def build_failure_breakdown(hours: int = 168, limit: int = 20) -> list[dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).replace(microsecond=0)
+    mirror_by_source = {mirror["source"]: mirror for mirror in valid_mirrors(load_config())}
+    counters: dict[tuple[str, str, str, str], dict] = {}
+    rows = db_rows(
+        """
+        SELECT id, run_id, source, target, copy_target, status, step, error, started_at, ended_at, duration_ms
+        FROM sync_run_items
+        WHERE status = 'failed' AND started_at >= ?
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (cutoff.isoformat(), max(1, min(limit * 10, 500))),
+    )
+    for row in rows:
+        explanation = explain_operational_error(row.get("error") or row.get("step") or "")
+        mirror = mirror_by_source.get(row.get("source") or "", {})
+        source_registry = image_registry_host(row.get("source") or "")
+        target_registry = image_registry_host(row.get("target") or row.get("copy_target") or "")
+        group = mirror.get("group") or "default"
+        key = (explanation["category"], source_registry, target_registry, group)
+        entry = counters.setdefault(
+            key,
+            {
+                "category": explanation["category"],
+                "reason": explanation["reason"],
+                "suggestion": explanation["suggestion"],
+                "source_registry": source_registry,
+                "target_registry": target_registry,
+                "group": group,
+                "project": mirror.get("project") or "default",
+                "environment": mirror.get("environment") or "local",
+                "count": 0,
+                "latest_at": "",
+                "sample_sources": [],
+            },
+        )
+        entry["count"] += 1
+        latest_at = row.get("ended_at") or row.get("started_at") or ""
+        if latest_at > entry["latest_at"]:
+            entry["latest_at"] = latest_at
+        source = row.get("source") or ""
+        if source and source not in entry["sample_sources"] and len(entry["sample_sources"]) < 3:
+            entry["sample_sources"].append(source)
+    return sorted(counters.values(), key=lambda item: (-item["count"], item["category"]))[:limit]
+
+
+def count_consecutive_failed_runs(limit: int = 10) -> int:
+    rows = db_rows(
+        """
+        SELECT status
+        FROM sync_runs
+        WHERE status IN ('completed', 'failed')
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (max(1, min(limit, 50)),),
+    )
+    count = 0
+    for row in rows:
+        if row.get("status") != "failed":
+            break
+        count += 1
+    return count
+
+
+def observability_alert(alert_id: str, severity: str, title: str, message: str, suggestion: str, details: dict | None = None) -> dict:
+    fingerprint_source = json.dumps(
+        {"id": alert_id, "severity": severity, "message": message, "details": details or {}},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return {
+        "id": alert_id,
+        "severity": severity,
+        "title": title,
+        "message": message,
+        "suggestion": suggestion,
+        "details": details or {},
+        "fingerprint": hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest()[:16],
+        "debounce_seconds": 1800,
+        "active": True,
+    }
+
+
+def build_observability_alerts(status: dict, windows: dict, failure_breakdown: list[dict]) -> list[dict]:
+    alerts = []
+    latest = status.get("latest_run") or {}
+    runtime = runtime_state()
+    deletion_count = deletion_mark_count()
+    if status.get("disk_low"):
+        alerts.append(
+            observability_alert(
+                "disk_low",
+                "error",
+                "磁盘空间不足",
+                "Registry 数据盘低于磁盘阈值。",
+                "先清理无用 tag、执行 Registry garbage-collect，或扩容数据卷。",
+                {"disk_free_bytes": status.get("disk_free_bytes")},
+            )
+        )
+    consecutive_failures = count_consecutive_failed_runs()
+    if consecutive_failures >= 2:
+        alerts.append(
+            observability_alert(
+                "consecutive_sync_failures",
+                "error",
+                "连续同步失败",
+                f"最近 {consecutive_failures} 次同步任务连续失败。",
+                "优先查看失败聚合中的最高频分类，并运行同步预检或诊断包。",
+                {"consecutive_failures": consecutive_failures},
+            )
+        )
+    elif latest.get("status") == "failed" or int(latest.get("failed") or 0) > 0:
+        alerts.append(
+            observability_alert(
+                "latest_run_failed",
+                "warning",
+                "最近同步失败",
+                "最近一轮同步存在失败项。",
+                "打开同步任务详情，按失败阶段和错误分类定位。",
+                {"run_id": latest.get("id"), "failed": latest.get("failed")},
+            )
+        )
+    last_heartbeat = status.get("last_heartbeat") or runtime.get("last_heartbeat", {}).get("value")
+    heartbeat_at = parse_observability_time(last_heartbeat)
+    heartbeat_threshold = max(3600, int(status.get("interval") or 30) * 180)
+    if not heartbeat_at:
+        alerts.append(
+            observability_alert(
+                "missing_sync_heartbeat",
+                "warning",
+                "同步心跳缺失",
+                "sync worker 尚未写入心跳。",
+                "确认 sync 容器已启动，并检查数据库连接和运行日志。",
+            )
+        )
+    else:
+        heartbeat_age = int((datetime.now(timezone.utc) - heartbeat_at).total_seconds())
+        if heartbeat_age > heartbeat_threshold:
+            alerts.append(
+                observability_alert(
+                    "stale_sync_heartbeat",
+                    "error",
+                    "同步心跳过期",
+                    f"sync worker 心跳已超过 {heartbeat_age} 秒未更新。",
+                    "检查 sync 容器状态、调度器和数据库写入权限。",
+                    {"last_heartbeat": last_heartbeat, "age_seconds": heartbeat_age, "threshold_seconds": heartbeat_threshold},
+                )
+            )
+    if deletion_count:
+        severity = "error" if deletion_count >= 20 else "warning"
+        alerts.append(
+            observability_alert(
+                "pending_deletion_marks",
+                severity,
+                "删除标记积压",
+                f"当前存在 {deletion_count} 个删除标记等待处理。",
+                "确认受保护 tag 后，按维护窗口执行 Registry garbage-collect。",
+                {"deletion_marks": deletion_count},
+            )
+        )
+    if status.get("using_default_token"):
+        alerts.append(
+            observability_alert(
+                "default_panel_token",
+                "warning",
+                "默认访问令牌",
+                "PANEL_TOKEN 仍为默认值 change-me。",
+                "在 .env 中设置强随机 PANEL_TOKEN，并重启服务。",
+            )
+        )
+    top_failure = failure_breakdown[0] if failure_breakdown else None
+    if top_failure and int(top_failure.get("count") or 0) >= 3:
+        alerts.append(
+            observability_alert(
+                "repeated_failure_category",
+                "warning",
+                "失败类型集中",
+                f"{top_failure['category']} 类型在最近 7 天出现 {top_failure['count']} 次。",
+                top_failure.get("suggestion") or "查看失败聚合和任务明细。",
+                {"category": top_failure["category"], "count": top_failure["count"]},
+            )
+        )
+    return alerts
+
+
+def build_observability_summary() -> dict:
+    status = get_status()
+    windows = {
+        "24h": build_sync_window_stats(24),
+        "7d": build_sync_window_stats(24 * 7),
+    }
+    trend = build_sync_trend(hours=24, bucket_hours=1)
+    failure_breakdown = build_failure_breakdown(hours=24 * 7)
+    alerts = build_observability_alerts(status, windows, failure_breakdown)
+    runtime = runtime_state()
+    last_heartbeat = status.get("last_heartbeat") or runtime.get("last_heartbeat", {}).get("value")
+    heartbeat_at = parse_observability_time(last_heartbeat)
+    heartbeat_age = int((datetime.now(timezone.utc) - heartbeat_at).total_seconds()) if heartbeat_at else None
+    health = "error" if any(item["severity"] == "error" for item in alerts) else ("warn" if alerts else "ok")
+    return {
+        "generated_at": now_iso(),
+        "health": health,
+        "version": {"app_version": APP_VERSION, "image_tag": IMAGE_TAG},
+        "windows": windows,
+        "trend": trend,
+        "disk_trend": build_disk_trend(),
+        "failure_breakdown": failure_breakdown,
+        "alerts": alerts,
+        "storage": {
+            "disk_low": bool(status.get("disk_low")),
+            "disk_free_bytes": status.get("disk_free_bytes"),
+            "deletion_marks": deletion_mark_count(),
+        },
+        "runtime": {
+            "last_heartbeat": last_heartbeat,
+            "heartbeat_age_seconds": heartbeat_age,
+            "sync_running": bool(status.get("is_syncing")),
+            "next_run_at": status.get("next_run_at"),
+        },
+        "notifications": {
+            "webhook_configured": bool(settings_with_defaults().get("notify_webhook_configured")),
+            "dedupe_seconds": 1800,
+            "delivery": "sync worker webhook",
+            "last_sent_at": runtime.get("notify_last_sent_at", {}).get("value"),
+            "last_sent_event": runtime.get("notify_last_sent_event", {}).get("value"),
+            "last_suppressed_at": runtime.get("notify_last_suppressed_at", {}).get("value"),
+            "last_suppressed_event": runtime.get("notify_last_suppressed_event", {}).get("value"),
+        },
+        "metrics": {
+            "sync_success_rate_24h": windows["24h"]["success_rate"],
+            "sync_success_rate_7d": windows["7d"]["success_rate"],
+            "sync_failed_runs_24h": windows["24h"]["failed_runs"],
+            "sync_failed_items_24h": windows["24h"]["failed_items"],
+            "observability_active_alerts": len(alerts),
+            "storage_deletion_marks": deletion_mark_count(),
+            "storage_disk_free_bytes": status.get("disk_free_bytes"),
+            "sync_consecutive_failures": count_consecutive_failed_runs(),
+            "sync_heartbeat_age_seconds": heartbeat_age,
+        },
+    }
+
+
 def build_ops_summary() -> dict:
     status = get_status()
     latest = status.get("latest_run")
@@ -2156,8 +2489,11 @@ def get_status():
         "auth_mode": "session",
         "admin_initialized": admin_user_exists(),
         "using_default_token": PANEL_TOKEN == "change-me",
+        "app_version": APP_VERSION,
+        "image_tag": IMAGE_TAG,
         "last_started_at": runtime.get("last_started_at", {}).get("value"),
         "last_finished_at": runtime.get("last_finished_at", {}).get("value"),
+        "last_heartbeat": runtime.get("last_heartbeat", {}).get("value"),
         "next_run_at": runtime.get("next_run_at", {}).get("value"),
         "sync_engine": runtime.get("sync_engine", {}).get("value", "skopeo"),
         "database_backend": settings["database_backend"],
@@ -2180,6 +2516,23 @@ def get_ops_upgrade_guide():
 @app.get("/api/ops/diagnostic-bundle")
 async def get_ops_diagnostic_bundle():
     return await build_diagnostic_bundle()
+
+
+@app.get("/api/observability/summary")
+def get_observability_summary():
+    return build_observability_summary()
+
+
+@app.get("/api/observability/metrics")
+def get_observability_metrics():
+    summary = build_observability_summary()
+    return {
+        "generated_at": summary["generated_at"],
+        "health": summary["health"],
+        "version": summary["version"],
+        "metrics": summary["metrics"],
+        "alerts": summary["alerts"],
+    }
 
 
 @app.get("/api/mirrors")

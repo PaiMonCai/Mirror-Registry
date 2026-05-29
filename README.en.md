@@ -58,6 +58,7 @@ SYNC_RETRY_COUNT=2
 SYNC_RETRY_BACKOFF_SECONDS=2
 DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
+NOTIFY_DEDUPE_SECONDS=1800
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
 CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
@@ -98,6 +99,8 @@ The full smoke checks Docker Compose config, panel login, Bearer token automatio
 ### Operations Summary and Release Checks
 
 The dashboard loads `/api/ops/summary` to show health, recent sync failures, disk state, deletion marks, and the running version in one place. Common auth, TLS, network, DNS, manifest, disk, and `skopeo` errors are mapped to readable reasons and suggestions while the original task error remains available in run details.
+
+The Observability page loads `/api/observability/summary` for 24h/7d sync success rate, failure breakdown, sync trend, disk state, deletion mark backlog, and active alerts. External scripts can pull `/api/observability/metrics` for lightweight metrics JSON; alert webhooks are still sent by the sync worker and `NOTIFY_DEDUPE_SECONDS` controls the dedupe window for repeated event types.
 
 For troubleshooting handoff, export a diagnostic bundle from the dashboard or call `/api/ops/diagnostic-bundle`. The bundle includes version, config summary, diagnostics, recent runs, recent failures, and events, while redacting password, token, session cookie, authfile, Authorization, and encrypted credential fields. The upgrade guide is available at `/api/ops/upgrade-guide` and covers environment variables, volumes, backups, and compatibility checks.
 

@@ -139,6 +139,7 @@ def require_compose_shape() -> None:
         "SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}",
         "DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}",
         "NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}",
+        "NOTIFY_DEDUPE_SECONDS: ${NOTIFY_DEDUPE_SECONDS:-1800}",
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
@@ -183,6 +184,7 @@ def require_compose_shape() -> None:
         "SYNC_RETRY_BACKOFF_SECONDS: ${SYNC_RETRY_BACKOFF_SECONDS:-2}",
         "DISK_LOW_BYTES: ${DISK_LOW_BYTES:-2147483648}",
         "NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}",
+        "NOTIFY_DEDUPE_SECONDS: ${NOTIFY_DEDUPE_SECONDS:-1800}",
         "REGISTRY_STORAGE_PATH: /data/registry",
         "SKOPEO_DEST_TLS_VERIFY",
         "PANEL_TOKEN: ${PANEL_TOKEN:-change-me}",
@@ -370,6 +372,14 @@ def require_panel_features() -> None:
         "explain_operational_error",
         "recent_failed_items",
         "deletion_mark_count",
+        "parse_observability_time",
+        "sync_run_rows_since",
+        "build_sync_window_stats",
+        "build_sync_trend",
+        "build_failure_breakdown",
+        "count_consecutive_failed_runs",
+        "build_observability_alerts",
+        "build_observability_summary",
         "build_ops_summary",
         "sanitize_for_export",
         "build_diagnostic_bundle",
@@ -377,6 +387,8 @@ def require_panel_features() -> None:
         "get_ops_summary",
         "get_ops_upgrade_guide",
         "get_ops_diagnostic_bundle",
+        "get_observability_summary",
+        "get_observability_metrics",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -481,6 +493,12 @@ def require_panel_features() -> None:
         "@app.get(\"/api/ops/summary\")",
         "@app.get(\"/api/ops/diagnostic-bundle\")",
         "@app.get(\"/api/ops/upgrade-guide\")",
+        "@app.get(\"/api/observability/summary\")",
+        "@app.get(\"/api/observability/metrics\")",
+        "success_rate",
+        "failure_breakdown",
+        "consecutive_sync_failures",
+        "missing_sync_heartbeat",
         "SENSITIVE_EXPORT_KEYS",
         "Bearer <redacted>",
         "<redacted>@",
@@ -532,6 +550,8 @@ def require_sync_features() -> None:
         "load_due_scheduled_policies",
         "process_scheduled_policy",
         "check_scheduled_policies",
+        "webhook_dedupe_key",
+        "should_send_webhook_event",
     ]:
         if name not in function_names:
             fail(f"sync/worker.py missing function {name}")
@@ -562,6 +582,8 @@ def require_sync_features() -> None:
         "SYNC_CONCURRENCY",
         "SYNC_RETRY_BACKOFF_SECONDS",
         "NOTIFY_WEBHOOK_URL",
+        "NOTIFY_DEDUPE_SECONDS",
+        "notify_last_suppressed_event",
         "DISK_LOW_BYTES",
         "deletion_marks",
         "audit_logs",
@@ -612,6 +634,7 @@ def require_frontend_features() -> None:
         "num",
         "loadDiagnostics",
         "loadRuns",
+        "loadObservability",
         "loadStorage",
         "loadSecurity",
         "loadPlatform",
@@ -664,6 +687,12 @@ def require_frontend_features() -> None:
         "运维摘要",
         "导出诊断包",
         "最近失败",
+        "/observability/summary",
+        "可观测",
+        "失败聚合",
+        "告警状态",
+        "同步趋势",
+        "成功率",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -749,6 +778,10 @@ def require_tests_and_docs() -> None:
         "test_ops_summary_explains_recent_failures_and_risk_flags",
         "test_diagnostic_bundle_redacts_secrets_and_includes_ops_context",
         "test_upgrade_guide_and_release_check_script_are_available",
+        "/api/observability/summary",
+        "/api/observability/metrics",
+        "test_observability_summary_aggregates_windows_failures_and_alerts",
+        "test_notify_webhook_deduplicates_repeated_events",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -798,6 +831,10 @@ def require_tests_and_docs() -> None:
         "诊断包",
         "升级说明",
         "scripts\\release-check.ps1",
+        "可观测",
+        "/api/observability/summary",
+        "/api/observability/metrics",
+        "NOTIFY_DEDUPE_SECONDS",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -838,6 +875,10 @@ def require_tests_and_docs() -> None:
         "diagnostic bundle",
         "upgrade guide",
         "scripts\\release-check.ps1",
+        "Observability",
+        "/api/observability/summary",
+        "/api/observability/metrics",
+        "NOTIFY_DEDUPE_SECONDS",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -857,6 +898,7 @@ def require_tests_and_docs() -> None:
         "SYNC_RETRY_BACKOFF_SECONDS=2",
         "DISK_LOW_BYTES=2147483648",
         "NOTIFY_WEBHOOK_URL=",
+        "NOTIFY_DEDUPE_SECONDS=1800",
         "SKOPEO_COPY_ALL=1",
         "CREDENTIALS_SECRET_KEY=",
     ]:

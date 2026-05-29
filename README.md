@@ -58,6 +58,7 @@ SYNC_RETRY_COUNT=2
 SYNC_RETRY_BACKOFF_SECONDS=2
 DISK_LOW_BYTES=2147483648
 NOTIFY_WEBHOOK_URL=
+NOTIFY_DEDUPE_SECONDS=1800
 SKOPEO_COPY_ALL=1
 SKOPEO_DEST_TLS_VERIFY=false
 CREDENTIALS_SECRET_KEY=replace-with-a-long-random-secret
@@ -98,6 +99,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 ### 运维摘要和发布检查
 
 概览页会加载 `/api/ops/summary`，集中展示健康状态、最近同步失败、磁盘状态、删除标记和当前版本。常见认证、TLS、网络、DNS、manifest、磁盘和 `skopeo` 错误会映射为可读原因与建议，原始错误仍保留在任务明细中。
+
+面板「可观测」页会加载 `/api/observability/summary`，展示 24h/7d 同步成功率、失败聚合、同步趋势、磁盘状态、删除标记积压和当前告警。外部脚本可拉取 `/api/observability/metrics` 获取轻量 metrics JSON；告警 webhook 继续由 sync worker 发送，并通过 `NOTIFY_DEDUPE_SECONDS` 控制同类事件去重窗口。
 
 需要给他人排障时，可在概览页导出诊断包，或调用 `/api/ops/diagnostic-bundle`。诊断包包含版本、配置摘要、诊断结果、最近任务、最近失败和事件，但会脱敏 password、token、session cookie、authfile、Authorization 和加密凭据字段。升级说明可通过 `/api/ops/upgrade-guide` 查看，覆盖环境变量、数据卷、备份和兼容性检查。
 

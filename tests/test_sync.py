@@ -152,6 +152,46 @@ def test_sync_run_persists_to_sqlite(tmp_path, monkeypatch):
     assert row["updated"] == 1
 
 
+def test_notify_webhook_deduplicates_repeated_events(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("NOTIFY_WEBHOOK_URL", "http://notify.local/hook")
+    monkeypatch.setenv("NOTIFY_DEDUPE_SECONDS", "1800")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    calls = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_urlopen(request, timeout=5):
+        calls.append((request.full_url, request.data, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(sync_main.urllib.request, "urlopen", fake_urlopen)
+
+    sync_main.notify_webhook("sync_failed", {"failed": 1})
+    sync_main.notify_webhook("sync_failed", {"failed": 1})
+
+    assert len(calls) == 1
+    assert sync_main.runtime_value("notify_last_sent_event") == "sync_failed"
+    assert sync_main.runtime_value("notify_last_suppressed_event") == "sync_failed"
+
+    state_key = f"notify_last_{sync_main.webhook_dedupe_key('sync_failed')}"
+    sync_main.set_runtime_state(state_key, "2000-01-01T00:00:00+00:00")
+    sync_main.notify_webhook("sync_failed", {"failed": 1})
+
+    assert len(calls) == 2
+
+
 def test_parse_trigger_accepts_multiple_sources(tmp_path, monkeypatch):
     trigger_path = tmp_path / "data" / ".trigger"
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))

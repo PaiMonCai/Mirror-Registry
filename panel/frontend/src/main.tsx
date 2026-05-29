@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity,
   Archive,
+  BarChart3,
   Boxes,
   FileKey2,
   Gauge,
@@ -32,6 +33,7 @@ type View =
   | 'mirrors'
   | 'credentials'
   | 'governance'
+  | 'observability'
   | 'schedules'
   | 'platform'
   | 'storage'
@@ -47,6 +49,7 @@ const viewMeta: Record<View, { title: string; subtitle: string; icon: React.Reac
   mirrors: { title: '镜像配置', subtitle: '维护、导入和导出上游镜像与目标 Registry。', icon: <Boxes size={18} /> },
   credentials: { title: '仓库凭据', subtitle: '加密保存源仓库和目标仓库认证信息。', icon: <KeyRound size={18} /> },
   governance: { title: '仓库治理', subtitle: '保护关键 tag、执行保留策略 dry-run 和查看恢复清单。', icon: <ShieldCheck size={18} /> },
+  observability: { title: '可观测', subtitle: '同步成功率、失败聚合、趋势和告警状态。', icon: <BarChart3 size={18} /> },
   schedules: { title: '计划推送', subtitle: '管理业务镜像的定时推送策略和最近失败原因。', icon: <History size={18} /> },
   platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <Archive size={18} /> },
   storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <HardDrive size={18} /> },
@@ -74,6 +77,12 @@ function formatMB(value: any) {
   return `${(bytes / 1_000_000).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MB`;
 }
 
+function formatRate(value: any) {
+  const rate = Number(value);
+  if (!Number.isFinite(rate)) return '-';
+  return `${(rate * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+}
+
 function diagnosticMessage(item: AnyRecord) {
   if (item?.details?.free_bytes !== undefined && item?.details?.total_bytes !== undefined) {
     return `剩余 ${formatMB(item.details.free_bytes)} / 总计 ${formatMB(item.details.total_bytes)}`;
@@ -87,6 +96,7 @@ function App() {
   const [auth, setAuth] = useState<AnyRecord>({ loading: true, authenticated: false });
   const [status, setStatus] = useState<AnyRecord>({});
   const [opsSummary, setOpsSummary] = useState<AnyRecord>({});
+  const [observability, setObservability] = useState<AnyRecord>({});
   const [mirrors, setMirrors] = useState<AnyRecord[]>([]);
   const [runs, setRuns] = useState<AnyRecord[]>([]);
   const [selectedRun, setSelectedRun] = useState<AnyRecord | null>(null);
@@ -156,6 +166,10 @@ function App() {
     setRuns(await api('GET', '/sync-runs?limit=30'));
   }
 
+  async function loadObservability() {
+    setObservability(await api('GET', '/observability/summary'));
+  }
+
   async function loadPlatform() {
     setPlatform(await api('GET', '/platform'));
     setGrouped(await api('GET', '/platform/groups'));
@@ -222,6 +236,7 @@ function App() {
       }
       if (view === 'credentials') await loadCredentials();
       if (view === 'governance') await loadGovernance();
+      if (view === 'observability') await loadObservability();
       if (view === 'schedules') {
         await loadSchedules();
         await loadCredentials();
@@ -310,6 +325,7 @@ function App() {
         {view === 'mirrors' && <Mirrors mirrors={filteredMirrors} credentials={credentials} search={search} setSearch={setSearch} api={api} reload={async () => { await loadMirrors(); await loadCredentials(); }} notify={notify} />}
         {view === 'credentials' && <Credentials credentials={credentials} api={api} reload={loadCredentials} notify={notify} />}
         {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
+        {view === 'observability' && <Observability data={observability} reload={loadObservability} />}
         {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
         {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
@@ -647,6 +663,58 @@ function Governance({ governance, api, reload, notify }: any) {
       <Panel title="备份恢复清单" action={<button onClick={runRestoreDrill}><ListChecks size={16} />恢复演练</button>}>
         <pre>{JSON.stringify(governance.backup || {}, null, 2)}</pre>
         {restoreDrill && <pre>{JSON.stringify(restoreDrill, null, 2)}</pre>}
+      </Panel>
+    </div>
+  );
+}
+
+function Observability({ data, reload }: { data: AnyRecord; reload: () => void }) {
+  const window24 = data.windows?.['24h'] || {};
+  const window7d = data.windows?.['7d'] || {};
+  const alerts = data.alerts || [];
+  const failures = data.failure_breakdown || [];
+  const trend = data.trend || [];
+  const cards = [
+    ['健康', <Badge value={data.health || 'ok'} />],
+    ['24h 成功率', formatRate(window24.success_rate)],
+    ['24h 失败项', window24.failed_items ?? 0],
+    ['7d 成功率', formatRate(window7d.success_rate)],
+    ['告警', alerts.length],
+    ['删除标记', data.storage?.deletion_marks ?? 0],
+  ];
+  return (
+    <div className="stack">
+      <div className="metric-grid">{cards.map(([label, value]) => <Metric key={label} label={label as string} value={value} />)}</div>
+      <Panel title="告警状态" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        {alerts.length === 0 ? <p className="warn">当前无活动告警。</p> : (
+          <table><thead><tr><th>级别</th><th>告警</th><th>说明</th><th>建议</th><th>指纹</th></tr></thead>
+            <tbody>{alerts.map((item: AnyRecord) => <tr key={item.fingerprint}><td><Badge value={item.severity} /></td><td>{item.title}</td><td>{item.message}</td><td>{item.suggestion}</td><td className="mono">{item.fingerprint}</td></tr>)}</tbody>
+          </table>
+        )}
+      </Panel>
+      <Panel title="失败聚合">
+        {failures.length === 0 ? <p className="warn">最近 7 天无失败聚合。</p> : (
+          <table><thead><tr><th>分类</th><th>次数</th><th>源 Registry</th><th>目标 Registry</th><th>镜像组</th><th>建议</th></tr></thead>
+            <tbody>{failures.map((item: AnyRecord) => <tr key={`${item.category}-${item.source_registry}-${item.target_registry}-${item.group}`}><td><Badge value={item.category} /></td><td>{item.count}</td><td>{item.source_registry}</td><td>{item.target_registry}</td><td>{item.project}/{item.environment}/{item.group}</td><td>{item.suggestion || item.reason}</td></tr>)}</tbody>
+          </table>
+        )}
+      </Panel>
+      <Panel title="同步趋势">
+        <table><thead><tr><th>时间桶</th><th>任务数</th><th>成功</th><th>失败</th><th>失败项</th></tr></thead>
+          <tbody>{trend.map((item: AnyRecord) => <tr key={item.bucket_start}><td>{item.bucket_start}</td><td>{item.total_runs}</td><td>{item.completed_runs}</td><td>{item.failed_runs}</td><td>{item.failed_items}</td></tr>)}</tbody>
+        </table>
+      </Panel>
+      <Panel title="通知状态">
+        <dl className="kv">
+          <dt>Webhook</dt><dd>{data.notifications?.webhook_configured ? '已配置' : '未配置'}</dd>
+          <dt>去重窗口</dt><dd>{data.notifications?.dedupe_seconds ?? 1800} 秒</dd>
+          <dt>上次发送</dt><dd>{data.notifications?.last_sent_at || '-'}</dd>
+          <dt>发送事件</dt><dd>{data.notifications?.last_sent_event || '-'}</dd>
+          <dt>上次抑制</dt><dd>{data.notifications?.last_suppressed_at || '-'}</dd>
+          <dt>抑制事件</dt><dd>{data.notifications?.last_suppressed_event || '-'}</dd>
+          <dt>Sync 心跳</dt><dd>{data.runtime?.last_heartbeat || '-'}</dd>
+          <dt>磁盘余量</dt><dd>{formatMB(data.storage?.disk_free_bytes)}</dd>
+        </dl>
       </Panel>
     </div>
   );

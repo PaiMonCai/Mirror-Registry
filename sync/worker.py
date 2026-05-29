@@ -43,6 +43,7 @@ SYNC_CONCURRENCY = int(os.getenv("SYNC_CONCURRENCY", "2"))
 SYNC_RETRY_BACKOFF_SECONDS = int(os.getenv("SYNC_RETRY_BACKOFF_SECONDS", "2"))
 DISK_LOW_BYTES = int(os.getenv("DISK_LOW_BYTES", str(2 * 1024 * 1024 * 1024)))
 NOTIFY_WEBHOOK_URL = os.getenv("NOTIFY_WEBHOOK_URL", "").strip()
+NOTIFY_DEDUPE_SECONDS = int(os.getenv("NOTIFY_DEDUPE_SECONDS", "1800"))
 SKOPEO_COPY_ALL = os.getenv("SKOPEO_COPY_ALL", "1") != "0"
 SKOPEO_SRC_TLS_VERIFY = os.getenv("SKOPEO_SRC_TLS_VERIFY", "true").lower()
 SKOPEO_DEST_TLS_VERIFY = os.getenv("SKOPEO_DEST_TLS_VERIFY", "false").lower()
@@ -1059,9 +1060,35 @@ def effective_webhook_url(config: dict) -> str:
     return str(settings.get("notify_webhook_url") or NOTIFY_WEBHOOK_URL).strip()
 
 
+def webhook_dedupe_key(event_type: str) -> str:
+    return hashlib.sha256(event_type.encode("utf-8")).hexdigest()[:16]
+
+
+def should_send_webhook_event(event_type: str) -> bool:
+    if NOTIFY_DEDUPE_SECONDS <= 0:
+        return True
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    fingerprint = webhook_dedupe_key(event_type)
+    state_key = f"notify_last_{fingerprint}"
+    try:
+        last_value = runtime_value(state_key, "")
+        last_sent_at = parse_iso(last_value) if last_value else datetime.min.replace(tzinfo=timezone.utc)
+        if last_sent_at != datetime.min.replace(tzinfo=timezone.utc) and (now - last_sent_at).total_seconds() < NOTIFY_DEDUPE_SECONDS:
+            set_runtime_state("notify_last_suppressed_at", now.isoformat())
+            set_runtime_state("notify_last_suppressed_event", event_type)
+            logger.info("webhook 通知已去重: %s", event_type)
+            return False
+        set_runtime_state(state_key, now.isoformat())
+    except Exception as exc:  # pragma: no cover - notification must not break sync execution
+        logger.warning("webhook 去重状态写入失败: %s", exc)
+    return True
+
+
 def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> None:
     url = webhook_url or NOTIFY_WEBHOOK_URL
     if not url:
+        return
+    if not should_send_webhook_event(event_type):
         return
     body = json.dumps(
         {
@@ -1083,6 +1110,8 @@ def notify_webhook(event_type: str, payload: dict, webhook_url: str = "") -> Non
     try:
         with urllib.request.urlopen(request, timeout=5) as response:
             logger.info("webhook 通知已发送: %s HTTP %s", event_type, response.status)
+        set_runtime_state("notify_last_sent_at", now_iso())
+        set_runtime_state("notify_last_sent_event", event_type)
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         logger.warning("webhook 通知失败: %s", exc)
 
