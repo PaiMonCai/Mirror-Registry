@@ -488,11 +488,15 @@ function Platform({ platform, grouped, api, reload, notify }: any) {
 }
 
 function Storage({ storage, api, reload, notify }: any) {
+  async function recalculate() {
+    await api('POST', '/storage/stats/recalculate', {});
+    notify('体积统计重算已排队');
+  }
   return (
     <div className="stack">
-      <Panel title="本地仓库">
-        <table><thead><tr><th>仓库</th><th>Tag</th><th>估算占用</th><th>删除标记</th></tr></thead>
-          <tbody>{(storage.images || []).flatMap((image: AnyRecord) => (image.tags || []).map((tag: AnyRecord) => <tr key={`${image.repo}:${tag.name}`}><td>{image.repo}</td><td>{tag.name}</td><td>{image.estimated_size_bytes ?? '-'}</td><td>{tag.marked_for_deletion ? '已标记' : <button onClick={() => api('POST', '/storage/delete-mark', { repo: image.repo, tag: tag.name, reason: 'manual' }).then(() => { reload(); notify('已标记'); })}>标记</button>}</td></tr>))}</tbody>
+      <Panel title="本地仓库" action={<button onClick={recalculate}>重算体积</button>}>
+        <table><thead><tr><th>仓库</th><th>Tag</th><th>逻辑体积</th><th>去重体积</th><th>共享层</th><th>删除标记</th></tr></thead>
+          <tbody>{(storage.images || []).flatMap((image: AnyRecord) => (image.tags || []).map((tag: AnyRecord) => <tr key={`${image.repo}:${tag.name}`}><td>{image.repo}</td><td>{tag.name}</td><td>{tag.stats?.logical_size_bytes ?? '-'}</td><td>{tag.stats?.deduplicated_size_bytes ?? image.deduplicated_size_bytes ?? image.estimated_size_bytes ?? '-'}</td><td>{tag.stats?.shared_blob_count ?? '-'}</td><td>{tag.marked_for_deletion ? '已标记' : <button onClick={() => api('POST', '/storage/delete-mark', { repo: image.repo, tag: tag.name, reason: 'manual' }).then(() => { reload(); notify('已标记'); })}>标记</button>}</td></tr>))}</tbody>
         </table>
       </Panel>
       <Panel title="垃圾回收指引"><pre>{(storage.garbage_collection?.commands || []).join('\n')}</pre></Panel>

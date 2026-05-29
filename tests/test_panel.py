@@ -533,3 +533,68 @@ def test_schedules_default_disabled_and_trigger_policy_run(panel_app):
     assert trigger["reason"] == "scheduled-policy:nightly-plan"
     audit = client.get("/api/audit-logs").json()
     assert any(item["resource_type"] == "scheduled_push_policy" and item["action"] == "run" for item in audit)
+
+
+def test_manifest_stats_deduplicate_shared_blobs(panel_app):
+    import panel.main as panel_main
+
+    child_a = {
+        "config": {"digest": "sha256:config-a", "size": 10},
+        "layers": [{"digest": "sha256:shared", "size": 100}, {"digest": "sha256:a", "size": 50}],
+    }
+    child_b = {
+        "config": {"digest": "sha256:config-b", "size": 12},
+        "layers": [{"digest": "sha256:shared", "size": 100}, {"digest": "sha256:b", "size": 60}],
+    }
+    manifest_list = {
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {"digest": "sha256:linux-amd64", "size": 1, "platform": {"os": "linux", "architecture": "amd64"}},
+            {"digest": "sha256:linux-arm64", "size": 1, "platform": {"os": "linux", "architecture": "arm64"}},
+        ],
+    }
+
+    stats = panel_main.compute_manifest_stats(
+        manifest_list,
+        {"sha256:linux-amd64": child_a, "sha256:linux-arm64": child_b},
+    )
+
+    assert stats["logical_size_bytes"] == 332
+    assert stats["deduplicated_size_bytes"] == 232
+    assert stats["shared_blob_count"] == 1
+    assert [item["platform"]["architecture"] for item in stats["platforms"]] == ["amd64", "arm64"]
+
+
+def test_storage_returns_marks_and_cached_stats_when_registry_unavailable(panel_app, monkeypatch):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+
+    import panel.main as panel_main
+
+    panel_main.upsert_storage_stat(
+        "library/busybox",
+        "latest",
+        "sha256:manifest",
+        {
+            "logical_size_bytes": 110,
+            "deduplicated_size_bytes": 110,
+            "shared_blob_count": 0,
+            "platforms": [],
+            "blobs": [{"digest": "sha256:layer", "size": 110}],
+        },
+    )
+    client.post(
+        "/api/storage/delete-mark",
+        json={"repo": "library/busybox", "tag": "latest", "reason": "manual"},
+        headers=headers,
+    )
+
+    async def fake_list_registry_images():
+        raise panel_main.HTTPException(502, "registry down")
+
+    monkeypatch.setattr(panel_main, "list_registry_images", fake_list_registry_images)
+    storage = client.get("/api/storage").json()
+
+    assert storage["registry_error"] == "registry down"
+    assert storage["stats_cached"] is True
+    assert storage["deletion_marks"][0]["repo"] == "library/busybox"

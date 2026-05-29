@@ -302,6 +302,10 @@ def require_panel_features() -> None:
         "upsert_schedule",
         "run_schedule",
         "assert_scheduled_policy_allowed",
+        "compute_manifest_stats",
+        "fetch_manifest",
+        "recalculate_storage_stats",
+        "queue_storage_stats_recalculate",
     ]:
         if name not in function_names:
             fail(f"panel/main.py missing function {name}")
@@ -358,6 +362,10 @@ def require_panel_features() -> None:
         "@app.get(\"/api/schedules\")",
         "scheduled_push_policies",
         "计划推送默认不允许覆盖 latest",
+        "storage_stats",
+        "MANIFEST_ACCEPT",
+        "Docker-Content-Digest",
+        "@app.post(\"/api/storage/stats/recalculate\"",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -488,6 +496,10 @@ def require_frontend_features() -> None:
         "仓库治理",
         "/schedules",
         "计划推送",
+        "/storage/stats/recalculate",
+        "逻辑体积",
+        "去重体积",
+        "共享层",
         "sync_concurrency",
         "Webhook URL",
         "平台配置",
@@ -555,6 +567,8 @@ def require_tests_and_docs() -> None:
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
+        "compute_manifest_stats",
+        "/api/storage",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -583,6 +597,7 @@ def require_tests_and_docs() -> None:
         "仓库治理",
         "CREDENTIALS_SECRET_KEY",
         "计划推送",
+        "镜像体积统计",
         "PANEL_TOKEN",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
@@ -614,6 +629,7 @@ def require_tests_and_docs() -> None:
         "Repository Governance",
         "CREDENTIALS_SECRET_KEY",
         "Scheduled Push",
+        "Image Size Statistics",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")

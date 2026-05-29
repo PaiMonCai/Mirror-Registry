@@ -77,6 +77,14 @@ The panel stores the token in browser local storage and sends it as a Bearer tok
 - Manual runs, create/update operations, and sync execution results are audited. Failures appear in run history, text logs, events, and webhook notifications.
 - Scheduled push refuses `latest` unless explicitly allowed, and tag protection rules still apply.
 
+## Image Size Statistics
+
+- The Storage page can queue manifest/blob recalculation in the background. Page requests read SQLite cache and do not perform heavy full scans.
+- Manifest requests send Docker schema2, OCI manifest, OCI index, and Docker manifest list `Accept` headers.
+- Tags show logical size, deduplicated size, shared blob count, and multi-platform breakdown.
+- Repository size deduplicates by blob digest, while physical Registry usage scans `data/registry/docker/registry/v2/blobs/sha256` separately.
+- If Registry is temporarily unavailable, `/api/storage` still returns deletion marks, cached stats, and a readable error.
+
 ## v3 Management
 
 - Concurrent sync: `sync_concurrency` defaults to `2`; the sync worker locks each target image so the same tag is not written concurrently.

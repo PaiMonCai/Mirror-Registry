@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 import httpx
 import yaml
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -39,6 +39,14 @@ PANEL_TOKEN = os.getenv("PANEL_TOKEN", "change-me")
 APP_VERSION = os.getenv("APP_VERSION", "v4")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 CREDENTIALS_SECRET_KEY = os.getenv("CREDENTIALS_SECRET_KEY", "")
+MANIFEST_ACCEPT = ", ".join(
+    [
+        "application/vnd.docker.distribution.manifest.v2+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.oci.image.index.v1+json",
+    ]
+)
 
 STATIC_DIR = Path(os.getenv("STATIC_DIR", "/panel/static"))
 if not STATIC_DIR.exists():
@@ -298,6 +306,19 @@ CREATE TABLE IF NOT EXISTS scheduled_push_policies (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS storage_stats (
+    repo TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    manifest_digest TEXT,
+    logical_size_bytes INTEGER NOT NULL DEFAULT 0,
+    deduplicated_size_bytes INTEGER NOT NULL DEFAULT 0,
+    shared_blob_count INTEGER NOT NULL DEFAULT 0,
+    platforms TEXT NOT NULL,
+    blobs TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(repo, tag)
+);
 """
 
 POSTGRES_SCHEMA_STATEMENTS = [
@@ -442,6 +463,20 @@ POSTGRES_SCHEMA_STATEMENTS = [
         last_error TEXT,
         created_at VARCHAR(64) NOT NULL,
         updated_at VARCHAR(64) NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS storage_stats (
+        repo VARCHAR(255) NOT NULL,
+        tag VARCHAR(128) NOT NULL,
+        manifest_digest VARCHAR(255),
+        logical_size_bytes INTEGER NOT NULL DEFAULT 0,
+        deduplicated_size_bytes INTEGER NOT NULL DEFAULT 0,
+        shared_blob_count INTEGER NOT NULL DEFAULT 0,
+        platforms TEXT NOT NULL,
+        blobs TEXT NOT NULL,
+        updated_at VARCHAR(64) NOT NULL,
+        PRIMARY KEY(repo, tag)
     )
     """,
 ]
@@ -1913,6 +1948,166 @@ def directory_size(path: Path) -> int | None:
     return total
 
 
+def registry_blob_physical_bytes() -> int | None:
+    return directory_size(REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2" / "blobs" / "sha256")
+
+
+def descriptor_blob(descriptor: dict) -> dict | None:
+    digest = descriptor.get("digest")
+    size = descriptor.get("size", 0)
+    if not digest:
+        return None
+    try:
+        size_int = int(size or 0)
+    except (TypeError, ValueError):
+        size_int = 0
+    return {"digest": digest, "size": size_int}
+
+
+def compute_manifest_stats(manifest: dict, child_manifests: dict[str, dict] | None = None) -> dict:
+    media_type = manifest.get("mediaType") or ""
+    child_manifests = child_manifests or {}
+    blob_counts: dict[str, int] = {}
+    blobs: list[dict] = []
+    platforms = []
+
+    def add_blob(blob: dict | None) -> None:
+        if not blob:
+            return
+        blobs.append(blob)
+        blob_counts[blob["digest"]] = blob_counts.get(blob["digest"], 0) + 1
+
+    if "manifests" in manifest:
+        total = 0
+        for descriptor in manifest.get("manifests") or []:
+            digest = descriptor.get("digest", "")
+            child = child_manifests.get(digest)
+            if child:
+                child_stats = compute_manifest_stats(child, child_manifests)
+                child_size = child_stats["logical_size_bytes"]
+                for blob in child_stats["blobs"]:
+                    add_blob(blob)
+            else:
+                child_blob = descriptor_blob(descriptor)
+                child_size = child_blob["size"] if child_blob else 0
+                add_blob(child_blob)
+            total += child_size
+            platforms.append(
+                {
+                    "digest": digest,
+                    "platform": descriptor.get("platform") or {},
+                    "logical_size_bytes": child_size,
+                    "media_type": descriptor.get("mediaType", ""),
+                }
+            )
+        unique = {blob["digest"]: blob["size"] for blob in blobs}
+        return {
+            "media_type": media_type,
+            "logical_size_bytes": total,
+            "deduplicated_size_bytes": sum(unique.values()),
+            "shared_blob_count": sum(1 for count in blob_counts.values() if count > 1),
+            "platforms": platforms,
+            "blobs": blobs,
+        }
+
+    add_blob(descriptor_blob(manifest.get("config") or {}))
+    for layer in manifest.get("layers") or []:
+        add_blob(descriptor_blob(layer))
+    unique = {blob["digest"]: blob["size"] for blob in blobs}
+    return {
+        "media_type": media_type,
+        "logical_size_bytes": sum(blob["size"] for blob in blobs),
+        "deduplicated_size_bytes": sum(unique.values()),
+        "shared_blob_count": sum(1 for count in blob_counts.values() if count > 1),
+        "platforms": platforms,
+        "blobs": blobs,
+    }
+
+
+def cached_storage_stats() -> dict[str, dict]:
+    rows = db_rows(
+        """
+        SELECT repo, tag, manifest_digest, logical_size_bytes, deduplicated_size_bytes, shared_blob_count, platforms, blobs, updated_at
+        FROM storage_stats
+        """
+    )
+    result = {}
+    for row in rows:
+        result[f"{row['repo']}:{row['tag']}"] = {
+            **row,
+            "platforms": json.loads(row.get("platforms") or "[]"),
+            "blobs": json.loads(row.get("blobs") or "[]"),
+        }
+    return result
+
+
+def upsert_storage_stat(repo: str, tag: str, manifest_digest: str, stats: dict) -> None:
+    db_execute("DELETE FROM storage_stats WHERE repo = ? AND tag = ?", (repo, tag))
+    db_execute(
+        """
+        INSERT INTO storage_stats(
+            repo, tag, manifest_digest, logical_size_bytes, deduplicated_size_bytes,
+            shared_blob_count, platforms, blobs, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            repo,
+            tag,
+            manifest_digest,
+            int(stats["logical_size_bytes"]),
+            int(stats["deduplicated_size_bytes"]),
+            int(stats["shared_blob_count"]),
+            json.dumps(stats["platforms"], ensure_ascii=False),
+            json.dumps(stats["blobs"], ensure_ascii=False),
+            now_iso(),
+        ),
+    )
+
+
+async def fetch_manifest(client: httpx.AsyncClient, registry_url: str, repo: str, reference: str) -> tuple[dict, str]:
+    response = await client.get(
+        f"{registry_url}/v2/{repo}/manifests/{reference}",
+        headers={"Accept": MANIFEST_ACCEPT},
+        timeout=15,
+    )
+    response.raise_for_status()
+    digest = response.headers.get("Docker-Content-Digest", reference)
+    return response.json(), digest
+
+
+async def recalculate_storage_stats() -> dict:
+    registry_url = get_registry_url()
+    images = await list_registry_images()
+    updated = 0
+    errors = []
+    async with httpx.AsyncClient() as client:
+        for image in images:
+            repo = image["repo"]
+            for tag in image.get("tags", []):
+                try:
+                    manifest, digest = await fetch_manifest(client, registry_url, repo, tag)
+                    child_manifests = {}
+                    for descriptor in manifest.get("manifests") or []:
+                        child_digest = descriptor.get("digest")
+                        if child_digest:
+                            child_manifests[child_digest] = (await fetch_manifest(client, registry_url, repo, child_digest))[0]
+                    stats = compute_manifest_stats(manifest, child_manifests)
+                    upsert_storage_stat(repo, tag, digest, stats)
+                    updated += 1
+                except (httpx.HTTPError, ValueError) as exc:
+                    errors.append({"repo": repo, "tag": tag, "error": str(exc)})
+    return {"updated": updated, "errors": errors}
+
+
+def recalculate_storage_stats_sync() -> None:
+    try:
+        result = asyncio.run(recalculate_storage_stats())
+        audit_log("recalculate", "storage_stats", "all", result)
+    except Exception as exc:
+        audit_log("recalculate_failed", "storage_stats", "all", {"error": str(exc)})
+
+
 def estimate_repo_size(repo: str) -> int | None:
     return directory_size(REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2" / "repositories" / repo)
 
@@ -2169,33 +2364,57 @@ async def get_storage():
         """
     )
     mark_by_ref = {f"{mark['repo']}:{mark['tag']}": mark for mark in marks}
+    stats_by_ref = cached_storage_stats()
     enriched = []
     for image in images:
         repo = image["repo"]
         repo_size = estimate_repo_size(repo)
+        repo_blobs = {}
+        for ref, stat in stats_by_ref.items():
+            if not ref.startswith(f"{repo}:"):
+                continue
+            for blob in stat.get("blobs", []):
+                repo_blobs[blob["digest"]] = blob["size"]
         enriched.append(
             {
                 "repo": repo,
                 "estimated_size_bytes": repo_size,
+                "deduplicated_size_bytes": sum(repo_blobs.values()) if repo_blobs else None,
                 "tags": [
                     {
                         "name": tag,
                         "marked_for_deletion": f"{repo}:{tag}" in mark_by_ref,
                         "deletion_mark": mark_by_ref.get(f"{repo}:{tag}"),
+                        "stats": stats_by_ref.get(f"{repo}:{tag}"),
                     }
                     for tag in image.get("tags", [])
                 ],
             }
         )
     total_storage = directory_size(REGISTRY_STORAGE_PATH)
+    physical_blobs = registry_blob_physical_bytes()
     return {
         "images": enriched,
         "deletion_marks": marks,
         "registry_storage_path": str(REGISTRY_STORAGE_PATH),
         "estimated_total_bytes": total_storage,
+        "physical_blob_bytes": physical_blobs,
+        "stats_cached": bool(stats_by_ref),
         "registry_error": registry_error,
         "garbage_collection": gc_guide(),
     }
+
+
+@app.get("/api/storage/stats")
+def list_storage_stats():
+    return list(cached_storage_stats().values())
+
+
+@app.post("/api/storage/stats/recalculate", dependencies=[Depends(require_write_token)])
+def queue_storage_stats_recalculate(background_tasks: BackgroundTasks):
+    background_tasks.add_task(recalculate_storage_stats_sync)
+    audit_log("queue_recalculate", "storage_stats", "all", {})
+    return {"ok": True, "status": "queued"}
 
 
 @app.get("/api/storage/search")
@@ -2231,6 +2450,7 @@ async def search_storage(q: str = "", status: str = "", limit: int = 100):
 @app.get("/api/storage/images/{repo:path}/tags/{tag}")
 def get_storage_image_detail(repo: str, tag: str):
     clean_repo, clean_tag = validate_repo_tag(repo, tag)
+    stats = cached_storage_stats().get(f"{clean_repo}:{clean_tag}")
     mark = db_one("SELECT id, repo, tag, reason, created_at FROM deletion_marks WHERE repo = ? AND tag = ?", (clean_repo, clean_tag))
     latest_item = db_one(
         """
@@ -2252,6 +2472,7 @@ def get_storage_image_detail(repo: str, tag: str):
         "deletion_mark": mark,
         "protection": protection_result(clean_repo, clean_tag, context.get("environment", "")),
         "latest_sync_item": latest_item,
+        "stats": stats,
         "estimated_size_bytes": estimate_repo_size(clean_repo),
     }
 

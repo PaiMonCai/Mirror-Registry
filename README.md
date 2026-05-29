@@ -77,6 +77,14 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 - 手动运行、创建、修改和 sync 执行结果都会写入审计；失败会进入任务历史、文本日志、事件和 webhook。
 - 计划推送默认不允许覆盖 `latest`，必须显式勾选允许，并且仍会受到 tag 保护规则约束。
 
+## 镜像体积统计
+
+- 存储页支持后台重算 manifest/blob 统计，默认读取 SQLite 缓存，不在页面请求中执行重型全量扫描。
+- manifest 请求会设置 Docker schema2、OCI manifest、OCI index 和 Docker manifest list 的 `Accept` 头。
+- tag 展示逻辑体积、去重体积、共享层数量和多架构 platform breakdown。
+- 仓库体积按 blob digest 去重，Registry 物理占用单独扫描 `data/registry/docker/registry/v2/blobs/sha256`。
+- Registry 暂时不可用时，`/api/storage` 仍会返回删除标记、缓存统计和可读错误。
+
 ## v3 管理增强能力
 
 - 并发同步：`sync_concurrency` 默认 `2`，同一目标镜像写入时会加锁，避免并发写入同一个 tag。
