@@ -155,6 +155,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - The API exposes `GET /api/sync-queue` plus `/api/sync-queue/{id}/pause`, `/resume`, `/cancel`, and `/replay` controls.
 - On startup, the worker recovers unfinished `running` / `cancel_requested` tasks back into retryable queue items, and legacy `.trigger` files are still converted into queue tasks.
 
+## Remote Worker
+
+- The default single-node `sync` worker still consumes the local `sync_queue` directly and writes `WORKER_ID`, `WORKER_NAME`, and `WORKER_LABELS` heartbeat records into `workers`.
+- The Worker page and `GET /api/workers` show local or remote execution nodes, latest heartbeat, labels, capabilities, and latest claimed task.
+- Remote workers use the reserved `WORKER_TOKEN` least-privilege entry with `X-Worker-Token` for `/api/workers/heartbeat`, `/api/workers/claim`, and `/api/workers/complete`.
+- `WORKER_TOKEN` does not grant admin panel access; rotate it in `.env` and restart panel if it leaks.
+
 ## Image Size Statistics
 
 - The Storage page can queue manifest/blob recalculation in the background. Page requests read SQLite cache and do not perform heavy full scans.

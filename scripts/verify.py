@@ -151,6 +151,10 @@ def require_compose_shape() -> None:
         "SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}",
         "COMMAND_TIMEOUT_SECONDS: 900",
         "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
+        "WORKER_TOKEN: ${WORKER_TOKEN:-}",
+        "WORKER_ID: ${WORKER_ID:-local-sync}",
+        "WORKER_NAME: ${WORKER_NAME:-Local Sync Worker}",
+        "WORKER_LABELS: ${WORKER_LABELS:-local,sync}",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in compose]
     if missing:
@@ -196,6 +200,10 @@ def require_compose_shape() -> None:
         "SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-false}",
         "COMMAND_TIMEOUT_SECONDS: 900",
         "CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}",
+        "WORKER_TOKEN: ${WORKER_TOKEN:-}",
+        "WORKER_ID: ${WORKER_ID:-local-sync}",
+        "WORKER_NAME: ${WORKER_NAME:-Local Sync Worker}",
+        "WORKER_LABELS: ${WORKER_LABELS:-local,sync}",
     ]
     missing_dev = [snippet for snippet in dev_required_snippets if snippet not in dev_compose]
     if missing_dev:
@@ -399,6 +407,19 @@ def require_panel_features() -> None:
         "get_ops_diagnostic_bundle",
         "get_observability_summary",
         "get_observability_metrics",
+        "worker_token_valid",
+        "require_worker_token",
+        "public_worker",
+        "upsert_worker_heartbeat",
+        "list_worker_rows",
+        "claim_worker_queue_task",
+        "complete_worker_queue_task",
+        "build_worker_guide",
+        "get_workers",
+        "get_worker_guide",
+        "worker_heartbeat",
+        "worker_claim",
+        "worker_complete",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -478,6 +499,14 @@ def require_panel_features() -> None:
         "migration-report.ps1",
         "CREDENTIALS_SECRET_KEY",
         "sync_queue",
+        "WORKER_TOKEN",
+        "workers",
+        "worker_claims",
+        "X-Worker-Token",
+        "@app.get(\"/api/workers\")",
+        "@app.post(\"/api/workers/heartbeat\"",
+        "@app.post(\"/api/workers/claim\"",
+        "@app.post(\"/api/workers/complete\"",
         "package_manifest",
         "protected_environment",
         "release_tag",
@@ -569,6 +598,8 @@ def require_sync_features() -> None:
         "webhook_dedupe_key",
         "should_send_webhook_event",
         "db_one",
+        "upsert_local_worker",
+        "record_local_worker_claim",
         "queue_dedupe_key",
         "parse_queue_sources",
         "enqueue_sync_queue_task",
@@ -634,6 +665,10 @@ def require_sync_features() -> None:
         "recovered after worker restart",
         "process_sync_queue",
         "scheduled policies queued",
+        "WORKER_ID",
+        "WORKER_LABELS",
+        "workers",
+        "worker_claims",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -724,6 +759,9 @@ def require_frontend_features() -> None:
         "恢复",
         "取消",
         "重放",
+        "/workers",
+        "Worker 状态",
+        "Worker 接入",
         "using_default_token",
         "/ops/summary",
         "/ops/diagnostic-bundle",
@@ -796,6 +834,9 @@ def require_tests_and_docs() -> None:
         "/api/migration/plan",
         "/api/migration/preflight",
         "migration-report.ps1",
+        "/api/workers",
+        "test_worker_heartbeat_claim_and_complete",
+        "test_sync_heartbeat_registers_local_worker",
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
@@ -890,6 +931,9 @@ def require_tests_and_docs() -> None:
         "/api/sync-queue",
         "跨机器迁移",
         "/api/migration/plan",
+        "远程 Worker",
+        "WORKER_TOKEN",
+        "/api/workers",
     ]:
         if snippet not in readme:
             fail(f"README.md missing {snippet!r}")
@@ -938,6 +982,9 @@ def require_tests_and_docs() -> None:
         "/api/sync-queue",
         "Cross-machine Migration",
         "/api/migration/plan",
+        "Remote Worker",
+        "WORKER_TOKEN",
+        "/api/workers",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -959,6 +1006,10 @@ def require_tests_and_docs() -> None:
         "NOTIFY_WEBHOOK_URL=",
         "NOTIFY_DEDUPE_SECONDS=1800",
         "SKOPEO_COPY_ALL=1",
+        "WORKER_TOKEN=replace-with-a-long-random-worker-token",
+        "WORKER_ID=local-sync",
+        "WORKER_NAME=Local Sync Worker",
+        "WORKER_LABELS=local,sync",
         "CREDENTIALS_SECRET_KEY=",
     ]:
         if snippet not in env_example:

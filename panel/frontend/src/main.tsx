@@ -19,6 +19,7 @@ import {
   RefreshCw,
   RotateCcw,
   Search,
+  ServerCog,
   Settings,
   ShieldCheck,
   Sun,
@@ -38,6 +39,7 @@ type View =
   | 'governance'
   | 'observability'
   | 'schedules'
+  | 'workers'
   | 'platform'
   | 'storage'
   | 'diagnostics'
@@ -54,6 +56,7 @@ const viewMeta: Record<View, { title: string; subtitle: string; icon: React.Reac
   governance: { title: '仓库治理', subtitle: '保护关键 tag、执行保留策略 dry-run 和查看恢复清单。', icon: <ShieldCheck size={18} /> },
   observability: { title: '可观测', subtitle: '同步成功率、失败聚合、趋势和告警状态。', icon: <BarChart3 size={18} /> },
   schedules: { title: '计划推送', subtitle: '管理业务镜像的定时推送策略和最近失败原因。', icon: <History size={18} /> },
+  workers: { title: 'Worker', subtitle: '查看本地和远程执行节点、心跳和最近领取任务。', icon: <ServerCog size={18} /> },
   platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <Archive size={18} /> },
   storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <HardDrive size={18} /> },
   diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <ListChecks size={18} /> },
@@ -116,6 +119,8 @@ function App() {
   const [credentials, setCredentials] = useState<AnyRecord[]>([]);
   const [governance, setGovernance] = useState<AnyRecord>({ rules: [], policies: [], backup: {}, migration: {} });
   const [schedules, setSchedules] = useState<AnyRecord[]>([]);
+  const [workers, setWorkers] = useState<AnyRecord[]>([]);
+  const [workerGuide, setWorkerGuide] = useState<AnyRecord>({});
   const [toast, setToast] = useState('');
   const [search, setSearch] = useState('');
   const api = useMemo(() => createApiClient(() => ''), []);
@@ -227,6 +232,15 @@ function App() {
     setSchedules(await api('GET', '/schedules'));
   }
 
+  async function loadWorkers() {
+    const [rows, guide] = await Promise.all([
+      api('GET', '/workers'),
+      api('GET', '/workers/guide'),
+    ]);
+    setWorkers(rows);
+    setWorkerGuide(guide);
+  }
+
   useEffect(() => {
     loadAuth();
   }, []);
@@ -251,6 +265,7 @@ function App() {
         await loadSchedules();
         await loadCredentials();
       }
+      if (view === 'workers') await loadWorkers();
       if (view === 'platform') await loadPlatform();
       if (view === 'storage') await loadStorage();
       if (view === 'diagnostics') await loadDiagnostics();
@@ -337,6 +352,7 @@ function App() {
         {view === 'governance' && <Governance governance={governance} api={api} reload={loadGovernance} notify={notify} />}
         {view === 'observability' && <Observability data={observability} reload={loadObservability} />}
         {view === 'schedules' && <Schedules schedules={schedules} credentials={credentials} api={api} reload={loadSchedules} notify={notify} />}
+        {view === 'workers' && <Workers workers={workers} guide={workerGuide} reload={loadWorkers} />}
         {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
         {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
@@ -819,6 +835,27 @@ function Schedules({ schedules, credentials, api, reload, notify }: any) {
       </Panel>
       <Panel title="计划列表">
         <table><thead><tr><th>ID</th><th>源</th><th>目标</th><th>Cron</th><th>启用</th><th>上次</th><th>下次</th><th>最近错误</th><th>操作</th></tr></thead><tbody>{schedules.map((item: AnyRecord) => <tr key={item.id}><td>{item.id}</td><td>{item.source}</td><td>{item.target}</td><td>{item.cron}</td><td><Badge value={item.enabled ? 'enabled' : 'disabled'} /></td><td>{item.last_run_at || '-'}</td><td>{item.next_run_at || '-'}</td><td>{item.last_error || '-'}</td><td><button onClick={() => run(item.id)}>运行</button></td></tr>)}</tbody></table>
+      </Panel>
+    </div>
+  );
+}
+
+function Workers({ workers, guide, reload }: any) {
+  return (
+    <div className="stack">
+      <Panel title="Worker 状态" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        <table><thead><tr><th>ID</th><th>名称</th><th>环境</th><th>状态</th><th>标签</th><th>能力</th><th>心跳</th><th>最近任务</th><th>消息</th></tr></thead>
+          <tbody>{workers.map((worker: AnyRecord) => <tr key={worker.worker_id}><td className="mono">{worker.worker_id}</td><td>{worker.name}</td><td>{worker.environment}</td><td><Badge value={worker.status} /></td><td>{(worker.labels || []).join(', ') || '-'}</td><td>{(worker.capabilities || []).join(', ') || '-'}</td><td>{worker.last_heartbeat}</td><td>{worker.latest_claim ? `#${worker.latest_claim.queue_id} ${worker.latest_claim.status}` : '-'}</td><td>{worker.message || '-'}</td></tr>)}</tbody>
+        </table>
+      </Panel>
+      <Panel title="Worker 接入">
+        <dl className="kv">
+          <dt>WORKER_TOKEN</dt><dd>{guide.enabled ? '已配置' : '未配置'}</dd>
+          <dt>心跳</dt><dd>{guide.endpoints?.heartbeat || '-'}</dd>
+          <dt>领取</dt><dd>{guide.endpoints?.claim || '-'}</dd>
+          <dt>回写</dt><dd>{guide.endpoints?.complete || '-'}</dd>
+        </dl>
+        <pre>{JSON.stringify(guide.notes || [], null, 2)}</pre>
       </Panel>
     </div>
   );

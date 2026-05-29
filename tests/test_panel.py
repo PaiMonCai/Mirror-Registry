@@ -45,6 +45,7 @@ def make_panel_client(
     monkeypatch.setenv("REGISTRY_STORAGE_PATH", str(registry_storage_path))
     monkeypatch.setenv("STATIC_DIR", str(static_dir))
     monkeypatch.setenv("PANEL_TOKEN", "test-token")
+    monkeypatch.setenv("WORKER_TOKEN", "worker-token")
     monkeypatch.setenv("ADMIN_USERNAME", "admin")
     monkeypatch.setenv("ADMIN_PASSWORD", "admin-password")
     monkeypatch.setenv("SESSION_TTL_SECONDS", "604800")
@@ -237,6 +238,37 @@ def test_sync_queue_control_flow(panel_app):
     replayed = client.post(f"/api/sync-queue/{queue_id}/replay", headers=headers).json()["queue"]
     assert replayed["reason"] == "replay:manual"
     assert replayed["status"] == "queued"
+
+
+def test_worker_heartbeat_claim_and_complete(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"X-Worker-Token": "worker-token"}
+    admin_headers = {"Authorization": "Bearer test-token"}
+
+    heartbeat = client.post(
+        "/api/workers/heartbeat",
+        json={"worker_id": "edge-1", "name": "Edge Worker", "labels": ["edge", "linux"], "environment": "prod", "capabilities": ["sync-queue"], "version": "v18"},
+        headers=headers,
+    )
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["worker"]["worker_id"] == "edge-1"
+    assert client.get("/api/workers").json()[0]["worker_id"] == "edge-1"
+    assert client.get("/api/workers/guide").json()["enabled"] is True
+
+    queue = client.post("/api/sync", headers=admin_headers).json()["queue"]
+    claim = client.post("/api/workers/claim", json={"worker_id": "edge-1", "labels": ["edge"], "environment": "prod"}, headers=headers).json()
+    assert claim["task"]["id"] == queue["id"]
+    assert claim["task"]["status"] == "running"
+
+    complete = client.post(
+        "/api/workers/complete",
+        json={"worker_id": "edge-1", "queue_id": queue["id"], "status": "completed", "run_id": 42, "message": "remote ok"},
+        headers=headers,
+    ).json()
+    assert complete["queue"]["status"] == "completed"
+    assert complete["queue"]["run_id"] == 42
+    assert "worker-token" not in json.dumps(client.get("/api/workers/guide").json(), ensure_ascii=False)
+    assert client.post("/api/workers/claim", json={"worker_id": "edge-1"}, headers={"X-Worker-Token": "bad"}).status_code == 401
 
 
 def test_rejects_image_reference_without_tag(panel_app):

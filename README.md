@@ -155,6 +155,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\release-check.ps1 -Version v1
 - API 可通过 `GET /api/sync-queue` 查看队列，并通过 `/api/sync-queue/{id}/pause`、`resume`、`cancel`、`replay` 控制任务。
 - worker 启动时会把未完成的 `running` / `cancel_requested` 任务恢复为可重试队列项，旧 `.trigger` 文件仍会被兼容转换为队列任务。
 
+## 远程 Worker
+
+- 默认单机 `sync` worker 仍直接消费本地 `sync_queue`，同时会把 `WORKER_ID`、`WORKER_NAME`、`WORKER_LABELS` 心跳写入 `workers`。
+- 面板「Worker」页和 `GET /api/workers` 可查看本地或远程执行节点、最近心跳、标签、能力和最近领取任务。
+- 远程 worker 预留 `WORKER_TOKEN` 最小权限入口，通过 `X-Worker-Token` 调用 `/api/workers/heartbeat`、`/api/workers/claim` 和 `/api/workers/complete`。
+- `WORKER_TOKEN` 不授予管理员面板权限；泄露时应在 `.env` 中轮换并重启 panel。
+
 ## 镜像体积统计
 
 - 存储页支持后台重算 manifest/blob 统计，默认读取 SQLite 缓存，不在页面请求中执行重型全量扫描。

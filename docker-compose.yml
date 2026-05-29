@@ -25,6 +25,7 @@ services:
       APP_VERSION: v4
       MIRROR_REGISTRY_IMAGE_TAG: ${MIRROR_REGISTRY_IMAGE_TAG:-latest}
       PANEL_TOKEN: ${PANEL_TOKEN:-change-me}
+      WORKER_TOKEN: ${WORKER_TOKEN:-}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       SESSION_TTL_SECONDS: ${SESSION_TTL_SECONDS:-604800}
@@ -63,6 +64,9 @@ services:
       SYNC_TARGET_REGISTRY: registry:5000
       COMMAND_TIMEOUT_SECONDS: 900
       CREDENTIALS_SECRET_KEY: ${CREDENTIALS_SECRET_KEY:-}
+      WORKER_ID: ${WORKER_ID:-local-sync}
+      WORKER_NAME: ${WORKER_NAME:-Local Sync Worker}
+      WORKER_LABELS: ${WORKER_LABELS:-local,sync}
     volumes:
       - mirror-registry-config:/config:ro
       - mirror-registry-data:/data

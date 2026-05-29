@@ -152,6 +152,24 @@ def test_sync_run_persists_to_sqlite(tmp_path, monkeypatch):
     assert row["updated"] == 1
 
 
+def test_sync_heartbeat_registers_local_worker(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")
+    monkeypatch.setenv("WORKER_ID", "local-test")
+    monkeypatch.setenv("WORKER_LABELS", "local,test")
+
+    import sync.sync as sync_main
+
+    importlib.reload(sync_main)
+    sync_main.update_heartbeat(interval=30, concurrency=2, retry_count=1)
+
+    with sync_main.connect_db() as conn:
+        row = conn.execute("SELECT worker_id, labels, status FROM workers WHERE worker_id = ?", ("local-test",)).fetchone()
+
+    assert row["status"] == "online"
+    assert json.loads(row["labels"]) == ["local", "test"]
+
+
 def test_notify_webhook_deduplicates_repeated_events(tmp_path, monkeypatch):
     monkeypatch.setenv("LOG_PATH", str(tmp_path / "data" / "sync.log"))
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'data' / 'mirror-registry.db'}")

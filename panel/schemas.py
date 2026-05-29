@@ -123,6 +123,30 @@ class BackupRestoreDrillIn(BaseModel):
     verify_registry_sample: bool = False
 
 
+class WorkerHeartbeatIn(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=64)
+    name: str | None = Field(default=None, max_length=120)
+    labels: list[str] = Field(default_factory=list, max_length=32)
+    environment: str = Field(default="local", max_length=64)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+    version: str | None = Field(default=None, max_length=64)
+    message: str | None = Field(default="", max_length=500)
+
+
+class WorkerClaimIn(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=64)
+    labels: list[str] = Field(default_factory=list, max_length=32)
+    environment: str | None = Field(default=None, max_length=64)
+
+
+class WorkerCompleteIn(BaseModel):
+    worker_id: str = Field(min_length=1, max_length=64)
+    queue_id: int = Field(ge=1)
+    status: str = Field(min_length=1, max_length=32)
+    run_id: int | None = Field(default=None, ge=1)
+    message: str | None = Field(default="", max_length=1000)
+
+
 class ScheduledPushPolicyIn(BaseModel):
     id: str | None = Field(default=None, max_length=64)
     name: str = Field(min_length=1, max_length=120)
