@@ -73,6 +73,28 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 
 浏览器访问使用 HttpOnly session cookie。`PANEL_TOKEN` 不再作为主要前端入口，只用于脚本、CI 或外部自动化通过 Bearer token 调用受保护 API。
 
+### 生产 smoke 验收
+
+生产验收以 `scripts\prod-smoke.ps1` 为准。默认模式只做安全检查和只读探测，不会拉镜像、启动或重启服务：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1
+```
+
+新机器或明确要启动服务时，显式传入 `-StartServices`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
+```
+
+脚本默认按生产门禁处理 `.env`：`PANEL_TOKEN` 不能是默认值，`ADMIN_PASSWORD` 不能为空或占位值，`CREDENTIALS_SECRET_KEY` 必须设置；如果 `PanelUrl` 使用 HTTPS，则 `SESSION_COOKIE_SECURE` 必须为 `true`。本机试跑可用 `-AllowInsecureLocal` 把这些安全项降级为 warning：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
+```
+
+完整 smoke 会检查 Docker Compose 配置、面板登录、Bearer token 自动化入口、Registry `/v2/`、诊断 API、备份恢复只读校验；在 `-StartServices` 且未传 `-SkipSync` 时，还会触发默认镜像同步并确认本地 Registry 中出现 `library/busybox:latest`。如果管理员账号已经在旧数据卷中初始化且密码不同，可通过 `-AdminUsername` 和 `-AdminPassword` 覆盖登录凭据。
+
 ## 前端工程化与仓库凭据
 
 - 管理面板前端使用 React + Vite + TypeScript 开发，构建产物继续由 FastAPI 静态托管。

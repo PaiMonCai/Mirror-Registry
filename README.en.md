@@ -73,6 +73,28 @@ MIRROR_REGISTRY_IMAGE_TAG=v1.0.0
 
 Browser access uses an HttpOnly session cookie. `PANEL_TOKEN` is no longer the primary frontend entry; it is kept for scripts, CI, or external automation using a Bearer token against protected APIs.
 
+### Production Smoke Test
+
+Production acceptance is centered on `scripts\prod-smoke.ps1`. By default, it performs security checks and read-only probes only; it does not pull images, start services, or restart services:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1
+```
+
+On a new host, or when you explicitly want the script to start services, pass `-StartServices`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -StartServices
+```
+
+The script treats `.env` as a production gate by default: `PANEL_TOKEN` cannot be the default value, `ADMIN_PASSWORD` cannot be empty or a placeholder, and `CREDENTIALS_SECRET_KEY` must be set. If `PanelUrl` uses HTTPS, `SESSION_COOKIE_SECURE` must be `true`. For local trials, use `-AllowInsecureLocal` to downgrade those security findings to warnings:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecureLocal
+```
+
+The full smoke checks Docker Compose config, panel login, Bearer token automation access, Registry `/v2/`, diagnostics API, and read-only backup/restore readiness. With `-StartServices` and without `-SkipSync`, it also triggers mirror sync and verifies `library/busybox:latest` in the local Registry when the default busybox mirror is configured. If the admin account was initialized earlier with a different password, pass `-AdminUsername` and `-AdminPassword`.
+
 ## Frontend Engineering and Registry Credentials
 
 - The panel frontend is built with React + Vite + TypeScript, and FastAPI continues to serve the built static files.

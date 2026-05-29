@@ -79,6 +79,7 @@ def require_paths() -> None:
         "mirror_registry_core/__init__.py",
         "mirror_registry_core/config.py",
         "scripts/check-runtime.ps1",
+        "scripts/prod-smoke.ps1",
         "scripts/build-dev-images.ps1",
         "tests/test_panel.py",
         "tests/test_sync.py",
@@ -685,6 +686,10 @@ def require_tests_and_docs() -> None:
         "HttpOnly session cookie",
         "python scripts\\verify.py",
         ".\\scripts\\check-runtime.ps1",
+        "scripts\\prod-smoke.ps1",
+        "-StartServices",
+        "-AllowInsecureLocal",
+        "-SkipSync",
         "python -m pytest",
         "docker compose config",
         "docker compose -f docker-compose.dev.yml config",
@@ -720,6 +725,10 @@ def require_tests_and_docs() -> None:
         "SESSION_COOKIE_SECURE",
         "account/password login",
         "HttpOnly session cookie",
+        "scripts\\prod-smoke.ps1",
+        "-StartServices",
+        "-AllowInsecureLocal",
+        "-SkipSync",
     ]:
         if snippet not in readme_en:
             fail(f"README.en.md missing {snippet!r}")
@@ -758,6 +767,25 @@ def require_tests_and_docs() -> None:
     ]:
         if snippet not in check_script:
             fail(f"scripts/check-runtime.ps1 missing {snippet!r}")
+    prod_smoke_script = read("scripts/prod-smoke.ps1")
+    for snippet in [
+        "[switch]$StartServices",
+        "[switch]$AllowInsecureLocal",
+        "[switch]$SkipSync",
+        "PANEL_TOKEN",
+        "ADMIN_PASSWORD",
+        "CREDENTIALS_SECRET_KEY",
+        "SESSION_COOKIE_SECURE",
+        "docker",
+        "compose",
+        "/auth/login",
+        "/diagnostics/run",
+        "/backup-restore/verify",
+        "/sync",
+        "/v2/library/busybox/tags/list",
+    ]:
+        if snippet not in prod_smoke_script:
+            fail(f"scripts/prod-smoke.ps1 missing {snippet!r}")
     dev_script = read("scripts/build-dev-images.ps1")
     for snippet in [
         "Get-Command gh",
