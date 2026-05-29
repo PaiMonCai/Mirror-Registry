@@ -80,6 +80,7 @@ def require_paths() -> None:
         "mirror_registry_core/config.py",
         "scripts/check-runtime.ps1",
         "scripts/prod-smoke.ps1",
+        "scripts/restore-drill.ps1",
         "scripts/build-dev-images.ps1",
         "tests/test_panel.py",
         "tests/test_sync.py",
@@ -340,6 +341,11 @@ def require_panel_features() -> None:
         "apply_retention_policy",
         "get_backup_restore_guide",
         "verify_backup_restore_readiness",
+        "build_backup_package_manifest",
+        "run_backup_restore_drill",
+        "backup_restore_package_manifest",
+        "backup_restore_drill",
+        "verify_credentials_decryptable",
         "search_storage",
         "get_storage_image_detail",
         "list_schedules",
@@ -428,6 +434,12 @@ def require_panel_features() -> None:
         "@app.get(\"/api/tag-protection\")",
         "@app.post(\"/api/retention-policies/{policy_id}/dry-run\"",
         "@app.get(\"/api/backup-restore-guide\")",
+        "@app.get(\"/api/backup-restore/package-manifest\")",
+        "@app.post(\"/api/backup-restore/drill\"",
+        "BackupRestoreDrillIn",
+        "恢复演练默认只读",
+        "restore-drill.ps1",
+        "package_manifest",
         "protected_environment",
         "release_tag",
         "CREDENTIALS_SECRET_KEY",
@@ -592,6 +604,8 @@ def require_frontend_features() -> None:
         "/tag-protection",
         "/retention-policies",
         "/backup-restore-guide",
+        "/backup-restore/drill",
+        "恢复演练",
         "仓库治理",
         "/schedules",
         "计划推送",
@@ -679,6 +693,8 @@ def require_tests_and_docs() -> None:
         "/api/tag-protection",
         "/api/retention-policies",
         "/api/backup-restore-guide",
+        "/api/backup-restore/package-manifest",
+        "/api/backup-restore/drill",
         "tag_written",
         "/api/schedules",
         "scheduled-policy:",
@@ -700,6 +716,8 @@ def require_tests_and_docs() -> None:
         "test_mirror_preflight_reports_protection_and_does_not_mutate_state",
         "test_mirror_preflight_uses_explicit_credentials_without_secret_leak",
         "test_mirror_preflight_batch_defaults_to_config_and_remote_probe",
+        "package_manifest",
+        "restore-drill.ps1",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")
@@ -838,6 +856,18 @@ def require_tests_and_docs() -> None:
     ]:
         if snippet not in prod_smoke_script:
             fail(f"scripts/prod-smoke.ps1 missing {snippet!r}")
+    restore_drill_script = read("scripts/restore-drill.ps1")
+    for snippet in [
+        "CREDENTIALS_SECRET_KEY",
+        "config\\mirrors.yml",
+        "data\\registry",
+        "data\\mirror-registry.db",
+        "readonly",
+        "ConvertTo-Json",
+        "ReportPath",
+    ]:
+        if snippet not in restore_drill_script:
+            fail(f"scripts/restore-drill.ps1 missing {snippet!r}")
     dev_script = read("scripts/build-dev-images.ps1")
     for snippet in [
         "Get-Command gh",

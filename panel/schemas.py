@@ -118,6 +118,11 @@ class BackupRestoreVerifyIn(BaseModel):
     require_credentials_secret: bool = True
 
 
+class BackupRestoreDrillIn(BaseModel):
+    require_credentials_secret: bool = True
+    verify_registry_sample: bool = False
+
+
 class ScheduledPushPolicyIn(BaseModel):
     id: str | None = Field(default=None, max_length=64)
     name: str = Field(min_length=1, max_length=120)

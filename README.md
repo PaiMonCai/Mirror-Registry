@@ -112,6 +112,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 - 「存储管理」保留搜索和镜像详情 API，可关联 tag 来源、digest、同步任务、删除标记和保护状态。
 - 凭据测试会区分认证失败、网络失败、Registry 不可达和权限不足，并保持 token/password 脱敏。
 - 备份恢复清单覆盖 `config/`、`data/registry/`、`data/mirror-registry.db`、`.env` 和 `CREDENTIALS_SECRET_KEY`，恢复时先做只读验证再启动 sync。
+- 恢复演练可通过面板「仓库治理」页或 `scripts\restore-drill.ps1` 生成只读报告，验证备份包结构、SQLite、Registry 数据目录和凭据主密钥，不会启动 sync。
 - 安全指南区分管理面板 HTTPS 入口和 Registry `/v2/` HTTPS 入口，sync 不需要暴露入站端口。
 
 ## 自动发布与计划推送

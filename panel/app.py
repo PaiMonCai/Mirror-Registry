@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 
 from mirror_registry_core.config import default_config
 from .schemas import (
+    BackupRestoreDrillIn,
     BackupRestoreVerifyIn,
     CredentialIn,
     CredentialTestIn,
@@ -3182,6 +3183,175 @@ def get_storage_image_detail(repo: str, tag: str):
     }
 
 
+def backup_path_item(name: str, path: Path, required: bool = True, secret: bool = False) -> dict:
+    exists = path.exists()
+    size = None
+    if exists and path.is_file():
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+    return {
+        "name": name,
+        "path": str(path),
+        "required": required,
+        "exists": exists,
+        "kind": "directory" if exists and path.is_dir() else "file",
+        "size_bytes": size,
+        "secret": secret,
+    }
+
+
+def build_backup_package_manifest() -> dict:
+    registry_root = REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2"
+    return {
+        "version": 1,
+        "generated_at": now_iso(),
+        "format": "zip",
+        "required_items": [
+            backup_path_item("config", CONFIG_PATH.parent),
+            backup_path_item("registry_storage", REGISTRY_STORAGE_PATH),
+            backup_path_item("database", DB_PATH),
+            {"name": "env_file", "path": ".env", "required": True, "exists": Path(".env").exists(), "kind": "file", "size_bytes": Path(".env").stat().st_size if Path(".env").exists() else None, "secret": True},
+            {"name": "credentials_secret", "path": "CREDENTIALS_SECRET_KEY", "required": True, "exists": bool(CREDENTIALS_SECRET_KEY.strip()), "kind": "environment", "size_bytes": None, "secret": True},
+        ],
+        "optional_items": [
+            backup_path_item("sync_log", LOG_PATH, required=False),
+            backup_path_item("sync_state", STATE_PATH, required=False),
+            backup_path_item("registry_v2_root", registry_root, required=False),
+        ],
+        "commands": {
+            "create": "Compress-Archive -Path config,data\\registry,data\\mirror-registry.db,.env -DestinationPath mirror-registry-backup.zip -Force",
+            "drill": "powershell -ExecutionPolicy Bypass -File .\\scripts\\restore-drill.ps1",
+        },
+        "notes": [
+            "备份包不得导出明文仓库凭据；凭据恢复依赖原始 CREDENTIALS_SECRET_KEY。",
+            "恢复演练默认只读，不启动 sync，不创建同步触发文件。",
+        ],
+    }
+
+
+def drill_check(name: str, status: str, message: str, suggestion: str = "", details: dict | None = None) -> dict:
+    return {
+        "name": name,
+        "status": status,
+        "ok": status != "error",
+        "message": message,
+        "suggestion": suggestion,
+        "details": details or {},
+    }
+
+
+def summarize_drill_checks(checks: list[dict]) -> dict:
+    status = "ok"
+    if any(item["status"] == "error" for item in checks):
+        status = "error"
+    elif any(item["status"] == "warn" for item in checks):
+        status = "warn"
+    return {
+        "status": status,
+        "ok": sum(1 for item in checks if item["status"] == "ok"),
+        "warn": sum(1 for item in checks if item["status"] == "warn"),
+        "error": sum(1 for item in checks if item["status"] == "error"),
+    }
+
+
+def verify_credentials_decryptable(require_secret: bool) -> dict:
+    rows = credential_rows()
+    if require_secret and not CREDENTIALS_SECRET_KEY.strip():
+        return drill_check("凭据主密钥", "error", "缺少 CREDENTIALS_SECRET_KEY", "恢复含加密凭据的数据前必须设置原始主密钥")
+    failed = []
+    for row in rows:
+        try:
+            decrypt_secret(row["encrypted_secret"])
+        except HTTPException:
+            failed.append(row["id"])
+    if failed:
+        return drill_check("凭据解密", "error", f"{len(failed)} 个凭据无法解密", "确认使用备份来源的 CREDENTIALS_SECRET_KEY", {"failed_ids": failed[:20]})
+    if rows:
+        return drill_check("凭据解密", "ok", f"{len(rows)} 个凭据可用原始主密钥解密", details={"credential_count": len(rows)})
+    return drill_check("凭据解密", "ok", "没有已保存凭据需要解密")
+
+
+def latest_successful_tag() -> dict | None:
+    return db_one(
+        """
+        SELECT source, target, new_digest, ended_at
+        FROM sync_run_items
+        WHERE status = 'success' AND target != ''
+        ORDER BY COALESCE(ended_at, started_at) DESC
+        LIMIT 1
+        """
+    )
+
+
+async def verify_registry_sample_manifest(enabled: bool) -> dict:
+    sample = latest_successful_tag()
+    if not enabled:
+        return drill_check("Registry 样本", "warn", "未启用 Registry 样本 manifest 探测", "需要端到端恢复演练时设置 verify_registry_sample=true")
+    if not sample:
+        return drill_check("Registry 样本", "warn", "没有成功同步记录可作为 manifest 样本", "先完成至少一次同步，再执行样本验证")
+    try:
+        repo, tag = image_repo_tag(sample["target"])
+    except HTTPException as exc:
+        return drill_check("Registry 样本", "error", f"最近成功记录的 target 无法解析: {exc.detail}", "检查同步任务历史")
+    async with httpx.AsyncClient(timeout=8) as client:
+        try:
+            manifest, digest = await fetch_manifest(client, get_registry_url(), repo, tag)
+        except (httpx.HTTPError, ValueError) as exc:
+            return drill_check("Registry 样本", "error", f"样本 manifest 不可读: {exc}", "确认 registry 数据已还原且 /v2/ 可访问", {"repo": repo, "tag": tag})
+    return drill_check(
+        "Registry 样本",
+        "ok",
+        f"样本 manifest 可读: {repo}:{tag}",
+        details={"repo": repo, "tag": tag, "digest": digest, "media_type": manifest.get("mediaType", "")},
+    )
+
+
+async def run_backup_restore_drill(body: BackupRestoreDrillIn) -> dict:
+    checks: list[dict] = []
+    try:
+        config = load_config()
+        checks.append(drill_check("配置文件", "ok", f"配置可读取，镜像 {len(valid_mirrors(config))} 条", details={"path": str(CONFIG_PATH)}))
+    except Exception as exc:
+        checks.append(drill_check("配置文件", "error", f"配置无法读取: {exc}", "检查 config/mirrors.yml 是否在备份包内"))
+
+    try:
+        db_rows("SELECT 1")
+        table_rows = db_rows("SELECT name FROM sqlite_master WHERE type = 'table'") if database_backend(DATABASE_URL) == "sqlite" else []
+        checks.append(drill_check("数据库", "ok", "数据库可读取", details={"path": str(DB_PATH), "tables": [row["name"] for row in table_rows]}))
+    except HTTPException as exc:
+        checks.append(drill_check("数据库", "error", f"数据库不可读: {exc.detail}", "检查 data/mirror-registry.db 是否还原"))
+
+    registry_root = REGISTRY_STORAGE_PATH / "docker" / "registry" / "v2"
+    if REGISTRY_STORAGE_PATH.exists():
+        status = "ok" if registry_root.exists() else "warn"
+        checks.append(drill_check("Registry 数据", status, f"Registry 数据目录存在: {REGISTRY_STORAGE_PATH}", "空仓库或新实例可能还没有 docker/registry/v2 子目录", {"path": str(REGISTRY_STORAGE_PATH)}))
+    else:
+        checks.append(drill_check("Registry 数据", "error", f"Registry 数据目录不存在: {REGISTRY_STORAGE_PATH}", "检查 data/registry 是否还原"))
+
+    checks.append(verify_credentials_decryptable(body.require_credentials_secret))
+    checks.append(await verify_registry_sample_manifest(body.verify_registry_sample))
+    trigger_absent = not TRIGGER_PATH.exists()
+    checks.append(drill_check("只读边界", "ok" if trigger_absent else "warn", "未发现同步触发文件" if trigger_absent else "存在同步触发文件，演练未创建但恢复前应确认来源", "恢复演练不会启动 sync 或写入 Registry"))
+
+    summary = summarize_drill_checks(checks)
+    return {
+        "ok": summary["error"] == 0,
+        "summary": summary,
+        "checked_at": now_iso(),
+        "readonly": True,
+        "package_manifest": build_backup_package_manifest(),
+        "checks": checks,
+        "report": {
+            "title": "Mirror Registry restore drill report",
+            "status": summary["status"],
+            "failed": [item["name"] for item in checks if item["status"] == "error"],
+            "warnings": [item["name"] for item in checks if item["status"] == "warn"],
+        },
+    }
+
+
 @app.get("/api/backup-restore-guide")
 def get_backup_restore_guide():
     return {
@@ -3197,16 +3367,19 @@ def get_backup_restore_guide():
             "Compress-Archive -Path config,data\\registry,data\\mirror-registry.db,.env -DestinationPath mirror-registry-backup.zip -Force",
             "docker compose start registry",
         ],
+        "package_manifest": build_backup_package_manifest(),
         "restore_steps": [
             "还原 config/、data/registry/、SQLite 数据库和 .env。",
             "先设置原始 CREDENTIALS_SECRET_KEY，再启动 panel 进行只读验证。",
             "通过 /api/backup-restore/verify 确认配置、数据库和 registry 数据可读。",
+            "通过 /api/backup-restore/drill 生成只读恢复演练报告。",
             "确认至少一个已同步 tag 可通过 Registry API 读取后，再启动 sync 写入。",
         ],
         "readonly_verification": [
             "docker compose up -d registry panel",
             "curl http://localhost:8080/api/status",
             "curl http://localhost:5000/v2/_catalog",
+            "powershell -ExecutionPolicy Bypass -File .\\scripts\\restore-drill.ps1",
         ],
         "tls_entry": {
             "panel": "面板入口建议只暴露 HTTPS，并叠加 Basic Auth 或 SSO。",
@@ -3231,6 +3404,18 @@ def verify_backup_restore_readiness(body: BackupRestoreVerifyIn):
     ok_status = all(item["ok"] for item in checks)
     audit_log("verify", "backup_restore", "readiness", {"ok": ok_status, "failed": [item["name"] for item in checks if not item["ok"]]})
     return {"ok": ok_status, "checks": checks, "guide": get_backup_restore_guide()}
+
+
+@app.get("/api/backup-restore/package-manifest")
+def backup_restore_package_manifest():
+    return build_backup_package_manifest()
+
+
+@app.post("/api/backup-restore/drill", dependencies=[Depends(require_write_token)])
+async def backup_restore_drill(body: BackupRestoreDrillIn):
+    result = await run_backup_restore_drill(body)
+    audit_log("drill", "backup_restore", "readonly", {"ok": result["ok"], "summary": result["summary"]})
+    return result
 
 
 @app.post("/api/storage/delete-mark", dependencies=[Depends(require_write_token)])

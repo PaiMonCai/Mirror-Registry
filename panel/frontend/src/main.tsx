@@ -566,6 +566,7 @@ function Governance({ governance, api, reload, notify }: any) {
   const [rule, setRule] = useState({ id: '', name: '', repo_pattern: '*', tag_pattern: 'v*', environment: '*', enabled: true, reason: 'release tag' });
   const [policy, setPolicy] = useState({ id: '', name: '', repo_pattern: '*', environment: '*', keep_last: 5, max_age_days: 30, enabled: false });
   const [dryRun, setDryRun] = useState<AnyRecord | null>(null);
+  const [restoreDrill, setRestoreDrill] = useState<AnyRecord | null>(null);
   async function saveRule() {
     await api('POST', '/tag-protection', { ...rule, id: rule.id || undefined });
     await reload();
@@ -581,6 +582,11 @@ function Governance({ governance, api, reload, notify }: any) {
     setDryRun(result);
     await reload();
     notify(apply ? '保留策略已标记候选 tag' : 'dry-run 已完成');
+  }
+  async function runRestoreDrill() {
+    const result = await api('POST', '/backup-restore/drill', { require_credentials_secret: true, verify_registry_sample: false });
+    setRestoreDrill(result);
+    notify(`恢复演练: ${result.summary.status}`);
   }
   return (
     <div className="stack">
@@ -609,7 +615,10 @@ function Governance({ governance, api, reload, notify }: any) {
         <table><thead><tr><th>ID</th><th>Repo</th><th>保留</th><th>天数</th><th>状态</th><th>操作</th></tr></thead><tbody>{(governance.policies || []).map((item: AnyRecord) => <tr key={item.id}><td>{item.id}</td><td>{item.repo_pattern}</td><td>{item.keep_last}</td><td>{item.max_age_days || '-'}</td><td><Badge value={item.enabled ? 'enabled' : 'dry-run'} /></td><td className="row-actions"><button onClick={() => runPolicy(item.id)}>dry-run</button><button onClick={() => runPolicy(item.id, true)}>标记</button></td></tr>)}</tbody></table>
         {dryRun && <pre>{JSON.stringify(dryRun, null, 2)}</pre>}
       </Panel>
-      <Panel title="备份恢复清单"><pre>{JSON.stringify(governance.backup || {}, null, 2)}</pre></Panel>
+      <Panel title="备份恢复清单" action={<button onClick={runRestoreDrill}><ListChecks size={16} />恢复演练</button>}>
+        <pre>{JSON.stringify(governance.backup || {}, null, 2)}</pre>
+        {restoreDrill && <pre>{JSON.stringify(restoreDrill, null, 2)}</pre>}
+      </Panel>
     </div>
   );
 }

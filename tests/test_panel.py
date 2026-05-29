@@ -824,19 +824,38 @@ def test_governance_blocks_protected_delete_and_retention_marks(panel_app):
 
 
 def test_backup_restore_guide_and_verify(panel_app):
-    client, _, _, _ = panel_app
+    client, _, _, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
     guide = client.get("/api/backup-restore-guide").json()
     assert "CREDENTIALS_SECRET_KEY" in guide["required_items"]
     assert any("/v2/" in item for item in guide["tls_entry"].values())
+    assert "package_manifest" in guide
 
     response = client.post(
         "/api/backup-restore/verify",
         json={"require_credentials_secret": True},
-        headers={"Authorization": "Bearer test-token"},
+        headers=headers,
     )
 
     assert response.status_code == 200
     assert response.json()["ok"] is True
+
+    manifest = client.get("/api/backup-restore/package-manifest").json()
+    assert manifest["commands"]["drill"].endswith("scripts\\restore-drill.ps1")
+    assert any(item["name"] == "credentials_secret" and item["secret"] for item in manifest["required_items"])
+
+    drill = client.post(
+        "/api/backup-restore/drill",
+        json={"require_credentials_secret": True, "verify_registry_sample": False},
+        headers=headers,
+    ).json()
+    assert drill["ok"] is True
+    assert drill["readonly"] is True
+    assert drill["summary"]["status"] == "warn"
+    assert any(item["name"] == "Registry 样本" and item["status"] == "warn" for item in drill["checks"])
+    assert "unit-secret-key" not in json.dumps(drill, ensure_ascii=False)
+    assert not trigger_path.exists()
+    assert any(item["action"] == "drill" and item["resource_type"] == "backup_restore" for item in client.get("/api/audit-logs").json())
 
 
 def test_schedules_default_disabled_and_trigger_policy_run(panel_app):

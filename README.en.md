@@ -112,6 +112,7 @@ The full smoke checks Docker Compose config, panel login, Bearer token automatio
 - Storage management has search and detail APIs that connect tag source, digest, sync task, deletion mark, and protection state.
 - Credential tests distinguish authentication failures, network failures, unreachable registries, and missing permissions while keeping token/password values redacted.
 - The backup checklist covers `config/`, `data/registry/`, `data/mirror-registry.db`, `.env`, and `CREDENTIALS_SECRET_KEY`; restore should run read-only validation before starting sync.
+- Restore drills can run from the Governance page or `scripts\restore-drill.ps1` to produce a read-only report for the backup package shape, SQLite, Registry data directory, and credentials master key without starting sync.
 - The security guide separates the panel HTTPS entry from the Registry `/v2/` HTTPS entry, and sync does not need an exposed inbound port.
 
 ## Automated Publishing and Scheduled Push
