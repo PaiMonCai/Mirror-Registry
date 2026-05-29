@@ -31,6 +31,7 @@ from .schemas import (
     BackupRestoreVerifyIn,
     CredentialIn,
     CredentialTestIn,
+    InstallUpgradePreflightIn,
     LoginIn,
     MirrorDiscoveryIn,
     MirrorGroupIn,
@@ -90,6 +91,7 @@ SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false").lower() in {
 APP_VERSION = os.getenv("APP_VERSION", "v4")
 IMAGE_TAG = os.getenv("MIRROR_REGISTRY_IMAGE_TAG", "latest")
 CREDENTIALS_SECRET_KEY = os.getenv("CREDENTIALS_SECRET_KEY", "")
+UPGRADE_CHECK_SCRIPT_LABEL = r"scripts\upgrade-check.ps1"
 MANIFEST_ACCEPT = ", ".join(
     [
         "application/vnd.docker.distribution.manifest.v2+json",
@@ -2954,11 +2956,13 @@ async def build_diagnostic_bundle() -> dict:
         "events": events,
         "deletion_marks": deletion_mark_count(),
         "upgrade_guide": build_upgrade_guide(),
+        "install_upgrade": build_install_upgrade_guide(include_preflight=False),
     }
     return sanitize_for_export(bundle)
 
 
 def build_upgrade_guide() -> dict:
+    install_upgrade = build_install_upgrade_guide(include_preflight=False)
     return {
         "principles": [
             "升级前先备份 config/、data/registry/、data/mirror-registry.db、.env 和 CREDENTIALS_SECRET_KEY。",
@@ -2991,7 +2995,235 @@ def build_upgrade_guide() -> dict:
             "PANEL_TOKEN remains supported for automation Bearer calls.",
             "sync continues to use skopeo and does not require host Docker socket.",
         ],
+        "install_upgrade": install_upgrade,
     }
+
+
+def command_safe_tag(value: str | None, fallback: str) -> str:
+    raw = str(value or "").strip()
+    return raw if re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", raw) else fallback
+
+
+def build_upgrade_command_set(expected_tag: str | None = None, previous_tag: str | None = None) -> dict:
+    target_tag = command_safe_tag(expected_tag, command_safe_tag(IMAGE_TAG, "latest"))
+    rollback_tag = command_safe_tag(previous_tag, "<previous-tag>")
+    return {
+        "first_install": "Copy .env.example to .env, edit secrets, then docker compose pull && docker compose up -d",
+        "host_preflight": f"powershell -ExecutionPolicy Bypass -File .\\{UPGRADE_CHECK_SCRIPT_LABEL} -ExpectedTag {target_tag}",
+        "backup": "powershell -ExecutionPolicy Bypass -File .\\scripts\\migration-report.ps1 -ReportPath .\\migration-report.json",
+        "upgrade": "docker compose pull && docker compose up -d",
+        "rollback": f"Set MIRROR_REGISTRY_IMAGE_TAG={rollback_tag} in .env, then docker compose pull && docker compose up -d",
+        "verify": "powershell -ExecutionPolicy Bypass -File .\\scripts\\prod-smoke.ps1 -AllowInsecureLocal",
+        "status": "curl http://localhost:8080/api/status",
+    }
+
+
+def build_upgrade_runtime_summary() -> dict:
+    settings = settings_with_defaults()
+    return {
+        "app_version": APP_VERSION,
+        "image_tag": IMAGE_TAG,
+        "database_backend": settings["database_backend"],
+        "registry_url": settings["registry_url"],
+        "admin_initialized": admin_user_exists(),
+        "admin_password_configured": bool(ADMIN_PASSWORD.strip()),
+        "panel_token_configured": bool(PANEL_TOKEN.strip() and PANEL_TOKEN != "change-me"),
+        "credentials_secret_configured": bool(CREDENTIALS_SECRET_KEY.strip()),
+        "worker_token_configured": bool(WORKER_TOKEN.strip()),
+        "active_queue": queue_count_by_status(["queued", "running", "paused", "cancel_requested"]),
+    }
+
+
+def build_upgrade_preflight(body: InstallUpgradePreflightIn | None = None) -> dict:
+    body = body or InstallUpgradePreflightIn()
+    expected_tag = str(body.expected_tag or "").strip()
+    checks: list[dict] = []
+
+    checks.append(
+        drill_check(
+            "image_tag",
+            "warn" if expected_tag and IMAGE_TAG != expected_tag else "ok",
+            f"running image tag: {IMAGE_TAG}" + (f", expected: {expected_tag}" if expected_tag else ""),
+            "确认 .env 中 MIRROR_REGISTRY_IMAGE_TAG 与准备部署的 release tag 一致",
+            {"image_tag": IMAGE_TAG, "expected_tag": expected_tag},
+        )
+    )
+
+    checks.append(
+        drill_check(
+            "admin_account",
+            "ok" if admin_user_exists() else "error",
+            "管理员账号已初始化" if admin_user_exists() else "管理员账号未初始化",
+            "首次部署必须设置 ADMIN_USERNAME 和 ADMIN_PASSWORD 后重启 panel",
+            {"admin_password_configured": bool(ADMIN_PASSWORD.strip())},
+        )
+    )
+    if admin_user_exists() and not ADMIN_PASSWORD.strip():
+        checks.append(
+            drill_check(
+                "admin_password_env",
+                "warn",
+                "ADMIN_PASSWORD 当前进程未配置",
+                "已有数据卷可继续使用旧管理员密码；新部署必须在 .env 中设置 ADMIN_PASSWORD",
+            )
+        )
+
+    checks.append(
+        drill_check(
+            "panel_token",
+            "warn" if PANEL_TOKEN == "change-me" else "ok",
+            "PANEL_TOKEN 仍为默认值" if PANEL_TOKEN == "change-me" else "PANEL_TOKEN 已配置且未输出内容",
+            "公网或团队使用前必须设置强随机 PANEL_TOKEN，并优先使用可撤销 API Token",
+        )
+    )
+
+    credential_count = len(credential_rows())
+    if CREDENTIALS_SECRET_KEY.strip():
+        credential_status = "ok"
+        credential_message = "CREDENTIALS_SECRET_KEY 已配置且未输出内容"
+    elif credential_count:
+        credential_status = "error"
+        credential_message = f"已有 {credential_count} 条仓库凭据，但缺少 CREDENTIALS_SECRET_KEY"
+    else:
+        credential_status = "warn"
+        credential_message = "CREDENTIALS_SECRET_KEY 未配置"
+    checks.append(
+        drill_check(
+            "credentials_secret",
+            credential_status,
+            credential_message,
+            "保存或恢复加密仓库凭据前必须使用原始 CREDENTIALS_SECRET_KEY",
+            {"credential_count": credential_count},
+        )
+    )
+
+    for name, path, required, write_check in [
+        ("config_file", CONFIG_PATH, True, False),
+        ("config_volume", CONFIG_PATH.parent, True, True),
+        ("data_volume", LOG_PATH.parent, True, True),
+        ("registry_storage", REGISTRY_STORAGE_PATH, False, False),
+    ]:
+        exists = path.exists()
+        writable = os.access(path, os.W_OK) if write_check and exists else True
+        status = "ok" if exists and writable else ("error" if required else "warn")
+        message = f"{path} {'存在' if exists else '缺失'}"
+        if exists and write_check:
+            message += "，可写" if writable else "，不可写"
+        checks.append(
+            drill_check(
+                name,
+                status,
+                message,
+                "确认 Docker volume 挂载正确；生产默认使用 named volumes",
+                {"path": str(path), "exists": exists, "writable": writable},
+            )
+        )
+
+    try:
+        db_rows("SELECT 1")
+        checks.append(drill_check("database", "ok", f"数据库可读: {database_backend(DATABASE_URL)}", details={"backend": database_backend(DATABASE_URL)}))
+    except Exception as exc:
+        checks.append(drill_check("database", "error", f"数据库不可读: {exc}", "升级前先恢复数据库可读状态"))
+
+    try:
+        base_path = REGISTRY_STORAGE_PATH if REGISTRY_STORAGE_PATH.exists() else LOG_PATH.parent
+        usage = shutil.disk_usage(base_path)
+        threshold = env_int("DISK_LOW_BYTES", 2147483648, 1048576, 1024 * 1024 * 1024 * 1024)
+        checks.append(
+            drill_check(
+                "disk_space",
+                "warn" if usage.free < threshold else "ok",
+                f"可用 {usage.free} bytes / 总计 {usage.total} bytes",
+                "升级前保留足够空间给 Registry 数据、SQLite 和回滚备份",
+                {"free_bytes": usage.free, "total_bytes": usage.total, "threshold_bytes": threshold},
+            )
+        )
+    except OSError as exc:
+        checks.append(drill_check("disk_space", "warn", f"无法读取磁盘空间: {exc}", f"在部署宿主机运行 {UPGRADE_CHECK_SCRIPT_LABEL} 复核"))
+
+    active_queue = queue_count_by_status(["queued", "running", "paused", "cancel_requested"])
+    checks.append(
+        drill_check(
+            "sync_queue",
+            "warn" if active_queue else "ok",
+            f"活动同步队列任务 {active_queue} 个",
+            "升级前建议等待队列清空，或记录需要重放的任务",
+            {"active": active_queue},
+        )
+    )
+
+    for name, path in [("compose_file", Path("docker-compose.yml")), ("upgrade_script", Path("scripts/upgrade-check.ps1"))]:
+        exists = path.exists()
+        checks.append(
+            drill_check(
+                name,
+                "ok" if exists else "warn",
+                f"{path} {'存在' if exists else '当前容器内不可见'}",
+                f"在部署宿主机保留 docker-compose.yml、.env 和 {UPGRADE_CHECK_SCRIPT_LABEL}",
+                {"path": str(path), "exists": exists},
+            )
+        )
+
+    docker_path = shutil.which("docker")
+    checks.append(
+        drill_check(
+            "docker_cli",
+            "ok" if docker_path else "warn",
+            f"docker: {docker_path}" if docker_path else "当前运行环境未发现 docker 命令",
+            "在部署宿主机执行升级命令前确认 Docker 和 Compose 可用",
+        )
+    )
+
+    summary = summarize_drill_checks(checks)
+    return {
+        "ok": summary["error"] == 0,
+        "readonly": True,
+        "checked_at": now_iso(),
+        "summary": summary,
+        "runtime": build_upgrade_runtime_summary(),
+        "checks": checks,
+        "commands": build_upgrade_command_set(expected_tag=body.expected_tag, previous_tag=body.previous_tag),
+    }
+
+
+def build_install_upgrade_guide(include_preflight: bool = True) -> dict:
+    guide = {
+        "title": "Mirror Registry install and upgrade guide",
+        "readonly": True,
+        "generated_at": now_iso(),
+        "runtime": build_upgrade_runtime_summary(),
+        "required_items": [
+            "docker-compose.yml",
+            ".env",
+            "PANEL_TOKEN",
+            "ADMIN_USERNAME",
+            "ADMIN_PASSWORD",
+            "CREDENTIALS_SECRET_KEY",
+            "MIRROR_REGISTRY_IMAGE_TAG",
+            "mirror-registry-config",
+            "mirror-registry-data",
+            "mirror-registry-storage",
+        ],
+        "stages": [
+            {"name": "first_install", "goal": "复制 .env.example，设置强随机密钥，拉取镜像并启动 compose。"},
+            {"name": "preflight", "goal": f"运行 /api/install-upgrade/preflight 或 {UPGRADE_CHECK_SCRIPT_LABEL}，确认版本、密钥、数据卷和队列状态。"},
+            {"name": "backup", "goal": "生成迁移报告或备份包，保留 .env、SQLite、config 和 Registry 数据。"},
+            {"name": "upgrade", "goal": "设置目标 MIRROR_REGISTRY_IMAGE_TAG，执行 docker compose pull && docker compose up -d。"},
+            {"name": "verify", "goal": "查看 /api/status、运行 prod-smoke，并确认 sync 队列和最近任务正常。"},
+            {"name": "rollback", "goal": "把 MIRROR_REGISTRY_IMAGE_TAG 改回上一版本，重新 pull/up，并用 smoke 复核。"},
+        ],
+        "commands": build_upgrade_command_set(),
+        "host_script": f"powershell -ExecutionPolicy Bypass -File .\\{UPGRADE_CHECK_SCRIPT_LABEL} -ExpectedTag <target-tag> -ReportPath .\\upgrade-check.json",
+        "compatibility": [
+            "默认仍是单机 Docker Compose，不要求外部数据库或远程 worker。",
+            "SQLite 数据路径保持 data/mirror-registry.db；旧 PANEL_TOKEN 自动化仍兼容。",
+            "升级和回滚命令只生成清单，不由面板自动执行 destructive 操作。",
+            "离线或内网环境可只使用本地脚本和已固定的 MIRROR_REGISTRY_IMAGE_TAG。",
+        ],
+    }
+    if include_preflight:
+        guide["preflight"] = build_upgrade_preflight()
+    return guide
 
 
 def summarize_platform(config: dict) -> dict:
@@ -3186,6 +3418,23 @@ def get_ops_summary():
 @app.get("/api/ops/upgrade-guide")
 def get_ops_upgrade_guide():
     return build_upgrade_guide()
+
+
+@app.get("/api/install-upgrade/guide")
+def get_install_upgrade_guide():
+    return build_install_upgrade_guide()
+
+
+@app.get("/api/setup/checklist")
+def get_setup_checklist():
+    return build_upgrade_preflight()
+
+
+@app.post("/api/install-upgrade/preflight", dependencies=[Depends(require_write_token)])
+def run_install_upgrade_preflight(body: InstallUpgradePreflightIn):
+    result = build_upgrade_preflight(body)
+    audit_log("preflight", "install_upgrade", "readonly", {"ok": result["ok"], "summary": result["summary"]})
+    return result
 
 
 @app.get("/api/ops/diagnostic-bundle")

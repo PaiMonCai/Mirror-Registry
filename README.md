@@ -104,6 +104,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 
 需要给他人排障时，可在概览页导出诊断包，或调用 `/api/ops/diagnostic-bundle`。诊断包包含版本、配置摘要、诊断结果、最近任务、最近失败和事件，但会脱敏 password、token、session cookie、authfile、Authorization 和加密凭据字段。升级说明可通过 `/api/ops/upgrade-guide` 查看，覆盖环境变量、数据卷、备份和兼容性检查。
 
+### 安装升级
+
+面板「安装升级」页和 `/api/install-upgrade/guide` 会把首次安装、升级、验证和回滚路径整理成只读清单；`/api/install-upgrade/preflight` 可检查当前运行版本、`MIRROR_REGISTRY_IMAGE_TAG`、管理员初始化、`PANEL_TOKEN`、`CREDENTIALS_SECRET_KEY`、数据卷、磁盘空间和 `/api/sync-queue` 活动任务。首次部署也可以调用 `/api/setup/checklist` 获取同一套初始化检查。
+
+在部署宿主机上可用脚本生成离线 JSON 报告，便于内网或不能访问面板时排查：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upgrade-check.ps1 -ExpectedTag v1.0.0 -ReportPath .\upgrade-check.json
+```
+
+推荐升级顺序是先运行 `scripts\upgrade-check.ps1`，再执行 `scripts\migration-report.ps1` 或备份数据卷，确认队列清空后运行 `docker compose pull && docker compose up -d`，最后用 `scripts\prod-smoke.ps1 -AllowInsecureLocal` 或生产参数复核。回滚只修改 `.env` 中的 `MIRROR_REGISTRY_IMAGE_TAG` 为上一版本 tag，再重新执行 `docker compose pull && docker compose up -d`；面板和脚本只生成命令清单，不会自动修改生产文件或删除数据。
+
 正式发版前可使用本地 release checklist 阻断缺少版本号、镜像 tag、版本说明、README 或 smoke 结果的发布准备：
 
 ```powershell

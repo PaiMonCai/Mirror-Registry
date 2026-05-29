@@ -104,6 +104,18 @@ The Observability page loads `/api/observability/summary` for 24h/7d sync succes
 
 For troubleshooting handoff, export a diagnostic bundle from the dashboard or call `/api/ops/diagnostic-bundle`. The bundle includes version, config summary, diagnostics, recent runs, recent failures, and events, while redacting password, token, session cookie, authfile, Authorization, and encrypted credential fields. The upgrade guide is available at `/api/ops/upgrade-guide` and covers environment variables, volumes, backups, and compatibility checks.
 
+### Install and Upgrade
+
+The Install and Upgrade page plus `/api/install-upgrade/guide` provide a read-only install and upgrade path for first install, upgrade, verification, and rollback. `/api/install-upgrade/preflight` checks the running version, `MIRROR_REGISTRY_IMAGE_TAG`, admin initialization, `PANEL_TOKEN`, `CREDENTIALS_SECRET_KEY`, volumes, disk space, and active `/api/sync-queue` tasks. New installs can also call `/api/setup/checklist` for the same setup checks.
+
+On the deployment host, generate an offline JSON report when the panel is unreachable or the server is in an intranet:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\upgrade-check.ps1 -ExpectedTag v1.0.0 -ReportPath .\upgrade-check.json
+```
+
+The recommended upgrade path is: run `scripts\upgrade-check.ps1`, create a `scripts\migration-report.ps1` report or volume backup, drain the queue, run `docker compose pull && docker compose up -d`, then verify with `scripts\prod-smoke.ps1 -AllowInsecureLocal` or your production smoke parameters. Rollback means setting `.env` `MIRROR_REGISTRY_IMAGE_TAG` back to the previous tag and rerunning `docker compose pull && docker compose up -d`; the panel and scripts only generate commands and never edit production files or delete data automatically.
+
 Before a release, run the local release checklist to block missing version numbers, image tags, version notes, README files, or smoke results:
 
 ```powershell

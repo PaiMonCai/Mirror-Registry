@@ -136,6 +136,11 @@ class BackupRestoreDrillIn(BaseModel):
     verify_registry_sample: bool = False
 
 
+class InstallUpgradePreflightIn(BaseModel):
+    expected_tag: str | None = Field(default=None, max_length=128)
+    previous_tag: str | None = Field(default=None, max_length=128)
+
+
 class WorkerHeartbeatIn(BaseModel):
     worker_id: str = Field(min_length=1, max_length=64)
     name: str | None = Field(default=None, max_length=120)

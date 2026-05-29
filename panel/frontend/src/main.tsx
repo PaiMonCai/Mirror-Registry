@@ -43,6 +43,7 @@ type View =
   | 'platform'
   | 'storage'
   | 'diagnostics'
+  | 'upgrade'
   | 'logs'
   | 'audit'
   | 'access'
@@ -61,6 +62,7 @@ const viewMeta: Record<View, { title: string; subtitle: string; icon: React.Reac
   platform: { title: '平台配置', subtitle: 'Registry 目标、镜像组和多环境视图。', icon: <Archive size={18} /> },
   storage: { title: '存储管理', subtitle: '仓库 tag、删除标记和垃圾回收指引。', icon: <HardDrive size={18} /> },
   diagnostics: { title: '验证诊断', subtitle: '检查依赖、目录、数据库和同步心跳。', icon: <ListChecks size={18} /> },
+  upgrade: { title: '安装升级', subtitle: '安装、升级、回滚和版本检查清单。', icon: <ListChecks size={18} /> },
   logs: { title: '日志 / 事件', subtitle: '同步日志和结构化事件。', icon: <Activity size={18} /> },
   audit: { title: '审计', subtitle: '面板和同步服务的操作记录。', icon: <ShieldCheck size={18} /> },
   access: { title: '访问控制', subtitle: '管理本地用户角色和可撤销 API Token。', icon: <LockKeyhole size={18} /> },
@@ -113,6 +115,7 @@ function App() {
   const [grouped, setGrouped] = useState<AnyRecord[]>([]);
   const [storage, setStorage] = useState<AnyRecord>({});
   const [diagnostics, setDiagnostics] = useState<AnyRecord>({});
+  const [installUpgrade, setInstallUpgrade] = useState<AnyRecord>({});
   const [logs, setLogs] = useState('');
   const [events, setEvents] = useState<AnyRecord[]>([]);
   const [audit, setAudit] = useState<AnyRecord[]>([]);
@@ -200,6 +203,10 @@ function App() {
     setDiagnostics(await api('POST', '/diagnostics/run'));
   }
 
+  async function loadInstallUpgrade() {
+    setInstallUpgrade(await api('GET', '/install-upgrade/guide'));
+  }
+
   async function loadLogs() {
     setLogs((await api('GET', '/logs?lines=150')).text || '');
     setEvents(await api('GET', '/events?limit=100'));
@@ -280,6 +287,7 @@ function App() {
       if (view === 'platform') await loadPlatform();
       if (view === 'storage') await loadStorage();
       if (view === 'diagnostics') await loadDiagnostics();
+      if (view === 'upgrade') await loadInstallUpgrade();
       if (view === 'logs') await loadLogs();
       if (view === 'audit') await loadAudit();
       if (view === 'access') await loadAccess();
@@ -368,6 +376,7 @@ function App() {
         {view === 'platform' && <Platform platform={platform} grouped={grouped} api={api} reload={loadPlatform} notify={notify} />}
         {view === 'storage' && <Storage storage={storage} api={api} reload={loadStorage} notify={notify} />}
         {view === 'diagnostics' && <Diagnostics diagnostics={diagnostics} reload={loadDiagnostics} />}
+        {view === 'upgrade' && <InstallUpgrade guide={installUpgrade} api={api} reload={loadInstallUpgrade} notify={notify} />}
         {view === 'logs' && <Logs logs={logs} events={events} reload={loadLogs} />}
         {view === 'audit' && <Audit rows={audit} reload={loadAudit} />}
         {view === 'access' && <AccessControl access={access} api={api} reload={loadAccess} notify={notify} />}
@@ -924,6 +933,60 @@ function Storage({ storage, api, reload, notify }: any) {
 
 function Diagnostics({ diagnostics, reload }: any) {
   return <Panel title="诊断结果" action={<button onClick={reload}><RefreshCw size={16} />重新检查</button>}><div className="check-grid">{(diagnostics.checks || []).map((item: AnyRecord) => <div className="check" key={item.name}><div className="check-status"><Badge value={item.status} /></div><strong>{item.name}</strong><span className="breakable">{diagnosticMessage(item)}</span>{item.suggestion && <small className="breakable">{item.suggestion}</small>}</div>)}</div></Panel>;
+}
+
+function InstallUpgrade({ guide, api, reload, notify }: any) {
+  const [form, setForm] = useState({ expected_tag: '', previous_tag: '' });
+  const [preflight, setPreflight] = useState<AnyRecord | null>(null);
+  useEffect(() => {
+    setForm((current) => current.expected_tag ? current : { ...current, expected_tag: guide.runtime?.image_tag || '' });
+  }, [guide.runtime?.image_tag]);
+  async function runPreflight() {
+    const result = await api('POST', '/install-upgrade/preflight', {
+      expected_tag: form.expected_tag || undefined,
+      previous_tag: form.previous_tag || undefined,
+    });
+    setPreflight(result);
+    notify(`升级预检: ${result.summary.status}`);
+  }
+  const runtime = guide.runtime || {};
+  const result = preflight || guide.preflight || {};
+  const cards = [
+    ['APP', runtime.app_version || '-'],
+    ['镜像 tag', runtime.image_tag || '-'],
+    ['数据库', runtime.database_backend || '-'],
+    ['队列', runtime.active_queue ?? 0],
+    ['管理员', <Badge value={runtime.admin_initialized ? 'ok' : 'error'} />],
+    ['密钥', <Badge value={runtime.credentials_secret_configured ? 'ok' : 'warn'} />],
+  ];
+  return (
+    <div className="stack">
+      <div className="metric-grid">{cards.map(([label, value]) => <Metric key={label} label={label as string} value={value} />)}</div>
+      <Panel title="安装升级预检" action={<button onClick={reload}><RefreshCw size={16} />刷新</button>}>
+        <div className="form-grid">
+          <input value={form.expected_tag} onChange={(e) => setForm({ ...form, expected_tag: e.target.value })} placeholder="目标 MIRROR_REGISTRY_IMAGE_TAG" />
+          <input value={form.previous_tag} onChange={(e) => setForm({ ...form, previous_tag: e.target.value })} placeholder="上一版本 tag" />
+          <button className="primary" onClick={runPreflight}><ListChecks size={16} />预检</button>
+        </div>
+        <div className="chip-list">
+          <span className="chip">状态 {result.summary?.status || '-'}</span>
+          <span className="chip">OK {result.summary?.ok ?? 0}</span>
+          <span className="chip">Warn {result.summary?.warn ?? 0}</span>
+          <span className="chip">Error {result.summary?.error ?? 0}</span>
+        </div>
+        <div className="check-grid">{(result.checks || []).map((item: AnyRecord) => <div className="check" key={item.name}><div className="check-status"><Badge value={item.status} /></div><strong>{item.name}</strong><span className="breakable">{item.message}</span>{item.suggestion && <small className="breakable">{item.suggestion}</small>}</div>)}</div>
+      </Panel>
+      <Panel title="升级路径">
+        <table><thead><tr><th>阶段</th><th>目标</th></tr></thead><tbody>{(guide.stages || []).map((item: AnyRecord) => <tr key={item.name}><td><Badge value={item.name} /></td><td>{item.goal}</td></tr>)}</tbody></table>
+      </Panel>
+      <Panel title="命令清单">
+        <table><thead><tr><th>场景</th><th>命令</th></tr></thead><tbody>{Object.entries(result.commands || guide.commands || {}).map(([name, command]) => <tr key={name}><td><Badge value={name} /></td><td className="mono breakable">{String(command)}</td></tr>)}</tbody></table>
+      </Panel>
+      <Panel title="兼容边界">
+        <pre>{JSON.stringify(guide.compatibility || [], null, 2)}</pre>
+      </Panel>
+    </div>
+  );
 }
 
 function Logs({ logs, events, reload }: any) {

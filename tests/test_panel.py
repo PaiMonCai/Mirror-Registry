@@ -1289,12 +1289,41 @@ def test_diagnostic_bundle_redacts_secrets_and_includes_ops_context(panel_app, m
 
 def test_upgrade_guide_and_release_check_script_are_available(panel_app):
     client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
 
     guide = client.get("/api/ops/upgrade-guide").json()
 
     assert "CREDENTIALS_SECRET_KEY" in guide["environment_variables"]
     assert "mirror-registry-storage:/var/lib/registry" in guide["volumes"]
     assert "python scripts\\verify.py" in guide["commands"]
+    assert guide["install_upgrade"]["runtime"]["image_tag"] == "latest"
+    assert r"scripts\upgrade-check.ps1" in guide["install_upgrade"]["host_script"]
+
+    install_guide = client.get("/api/install-upgrade/guide").json()
+    assert install_guide["readonly"] is True
+    assert "MIRROR_REGISTRY_IMAGE_TAG" in install_guide["required_items"]
+    assert r"scripts\upgrade-check.ps1" in install_guide["host_script"]
+    assert install_guide["preflight"]["readonly"] is True
+    assert "unit-secret-key" not in json.dumps(install_guide, ensure_ascii=False)
+
+    setup = client.get("/api/setup/checklist").json()
+    assert any(item["name"] == "panel_token" for item in setup["checks"])
+
+    preflight = client.post(
+        "/api/install-upgrade/preflight",
+        json={"expected_tag": "latest", "previous_tag": "v1.0.0"},
+        headers=headers,
+    ).json()
+    assert preflight["readonly"] is True
+    assert preflight["commands"]["rollback"].startswith("Set MIRROR_REGISTRY_IMAGE_TAG=v1.0.0")
+    assert any(item["name"] == "sync_queue" for item in preflight["checks"])
+    assert "unit-secret-key" not in json.dumps(preflight, ensure_ascii=False)
+    assert any(item["action"] == "preflight" and item["resource_type"] == "install_upgrade" for item in client.get("/api/audit-logs").json())
+
+    upgrade_script = (Path(__file__).resolve().parents[1] / "scripts" / "upgrade-check.ps1").read_text(encoding="utf-8")
+    for snippet in ["ExpectedTag", "MIRROR_REGISTRY_IMAGE_TAG", "docker compose pull && docker compose up -d", "rollback", "ReportPath"]:
+        assert snippet in upgrade_script
+
     release_script = (Path(__file__).resolve().parents[1] / "scripts" / "release-check.ps1").read_text(encoding="utf-8")
     for snippet in ["Version", "ImageTag", "SmokeResultPath", "CHANGELOG.md", "latest", "Release checklist failed"]:
         assert snippet in release_script
