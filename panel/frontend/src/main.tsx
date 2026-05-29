@@ -426,6 +426,8 @@ function Runs({ runs, selectedRun, setSelectedRun, api, reload, notify }: any) {
 
 function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify }: any) {
   const [form, setForm] = useState({ source: '', target: '', source_credential_id: '', target_credential_id: '' });
+  const [preflightRemote, setPreflightRemote] = useState(false);
+  const [preflightResult, setPreflightResult] = useState<AnyRecord | null>(null);
   const [discoveryForm, setDiscoveryForm] = useState({
     source_type: 'auto',
     target_registry: 'localhost:5000',
@@ -445,6 +447,21 @@ function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify 
     await reload();
     notify(`已导入 ${result.imported} 个镜像`);
   }
+  async function preflightDraft() {
+    const result = await api('POST', '/mirrors/preflight', { ...form, check_remote: preflightRemote });
+    setPreflightResult({ summary: { total: 1, [result.summary.status]: 1 }, items: [result] });
+    notify(`预检结果: ${result.summary.status}`);
+  }
+  async function preflightMirror(mirror: AnyRecord) {
+    const result = await api('POST', '/mirrors/preflight', { ...mirror, check_remote: preflightRemote });
+    setPreflightResult({ summary: { total: 1, [result.summary.status]: 1 }, items: [result] });
+    notify(`预检结果: ${result.summary.status}`);
+  }
+  async function preflightAll() {
+    const result = await api('POST', '/mirrors/preflight/batch', { check_remote: preflightRemote });
+    setPreflightResult(result);
+    notify(`批量预检: ${result.summary.error} error / ${result.summary.warn} warn`);
+  }
   return (
     <div className="stack">
       <Panel title="添加镜像">
@@ -455,6 +472,25 @@ function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify 
           <select value={form.target_credential_id} onChange={(e) => setForm({ ...form, target_credential_id: e.target.value })}><option value="">目标凭据自动</option>{credentials.map((c: AnyRecord) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
           <button className="primary" onClick={() => api('POST', '/mirrors', form).then(() => { setForm({ source: '', target: '', source_credential_id: '', target_credential_id: '' }); reload(); notify('镜像已添加'); })}>添加</button>
         </div>
+      </Panel>
+      <Panel title="同步预检">
+        <div className="form-grid">
+          <label className="checkline"><input type="checkbox" checked={preflightRemote} onChange={(e) => setPreflightRemote(e.target.checked)} />远程探测</label>
+          <button onClick={preflightDraft}><ListChecks size={16} />预检当前表单</button>
+          <button onClick={preflightAll}><ListChecks size={16} />批量预检</button>
+        </div>
+        {preflightResult && <div className="discovery-result">
+          <div className="chip-list">
+            <span className="chip">总数 {preflightResult.summary?.total ?? preflightResult.items?.length ?? 0}</span>
+            <span className="chip">OK {preflightResult.summary?.ok ?? 0}</span>
+            <span className="chip">Warn {preflightResult.summary?.warn ?? 0}</span>
+            <span className="chip">Error {preflightResult.summary?.error ?? 0}</span>
+            <span className="chip">{preflightRemote ? 'remote' : 'local-only'}</span>
+          </div>
+          <table><thead><tr><th>源镜像</th><th>目标</th><th>结果</th><th>检查项</th></tr></thead>
+            <tbody>{(preflightResult.items || []).map((item: AnyRecord, index: number) => <tr key={`${item.source}-${index}`}><td>{item.source}</td><td>{item.target}</td><td><Badge value={item.summary?.status} /></td><td>{(item.checks || []).map((check: AnyRecord) => `${check.name}:${check.status}`).join(' / ')}</td></tr>)}</tbody>
+          </table>
+        </div>}
       </Panel>
       <Panel title="镜像发现">
         <div className="form-grid discovery-form">
@@ -489,7 +525,7 @@ function Mirrors({ mirrors, credentials, search, setSearch, api, reload, notify 
       </Panel>
       <Panel title="镜像列表" action={<div className="search"><Search size={15} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="搜索镜像、tag、环境" /></div>}>
         <table><thead><tr><th>源</th><th>目标</th><th>凭据</th><th>状态</th><th>操作</th></tr></thead>
-          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已触发'))}>同步</button><button onClick={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</button><button className="danger" onClick={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
+          <tbody>{mirrors.map((m: AnyRecord) => <tr key={m.index}><td>{m.source}</td><td>{m.target}</td><td>{m.source_credential_id || `host:${hostFromImage(m.source)}`} / {m.target_credential_id || `host:${hostFromImage(m.target)}`}</td><td><Badge value={m.synced ? 'synced' : 'pending'} /></td><td className="row-actions"><button onClick={() => preflightMirror(m)}><ListChecks size={14} />预检</button><button onClick={() => api('POST', `/mirrors/${m.index}/sync`).then(() => notify('单镜像同步已触发'))}>同步</button><button onClick={() => api('POST', `/mirrors/${m.index}/reset`).then(reload)}>重置</button><button className="danger" onClick={() => api('DELETE', `/mirrors/${m.index}`).then(reload)}><Trash2 size={14} /></button></td></tr>)}</tbody>
         </table>
       </Panel>
     </div>

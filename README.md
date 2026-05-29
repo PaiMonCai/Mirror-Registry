@@ -139,6 +139,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\prod-smoke.ps1 -AllowInsecure
 - 通知能力：配置 `NOTIFY_WEBHOOK_URL` 或面板 webhook 后，会发送同步失败、失败恢复和磁盘空间不足事件。
 - 认证增强：后台 API 默认要求账号密码登录；`PANEL_TOKEN` 仅保留为自动化兼容入口，公网暴露前仍建议放在反向代理后，并可叠加 Basic Auth 或可信 IP 限制。
 - 导入导出：面板支持镜像列表 JSON 导出、合并导入和覆盖导入，用于备份和恢复。
+- 同步预检：面板支持单条和批量预检，默认只读检查镜像配置、凭据、tag 保护和 latest 风险；显式启用远程探测后才访问上游 manifest 和目标 Registry `/v2/`。
 
 ## v4 平台化扩展能力
 

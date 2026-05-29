@@ -139,6 +139,7 @@ The full smoke checks Docker Compose config, panel login, Bearer token automatio
 - Notifications: configure `NOTIFY_WEBHOOK_URL` or the panel webhook setting to send sync failure, recovery, and low disk space events.
 - Authentication boundary: backend APIs require account/password login by default. `PANEL_TOKEN` is retained only for automation compatibility, and the panel should still sit behind a reverse proxy with optional Basic Auth or trusted IP limits before public exposure.
 - Import/export: the panel can export, merge import, and replace import mirror lists for backup and restore.
+- Sync preflight: the panel can run single-image or batch read-only checks for image config, credentials, tag protection, and `latest` risk. Remote probes for upstream manifests and target Registry `/v2/` run only when explicitly enabled.
 
 ## v4 Platform Extensions
 

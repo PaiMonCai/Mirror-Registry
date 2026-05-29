@@ -40,6 +40,15 @@ class MirrorDiscoveryIn(BaseModel):
     trigger_sync: bool = False
 
 
+class MirrorPreflightIn(MirrorIn):
+    check_remote: bool = False
+
+
+class MirrorPreflightBatchIn(BaseModel):
+    mirrors: list[MirrorIn] = Field(default_factory=list, max_length=500)
+    check_remote: bool = False
+
+
 class RegistryIn(BaseModel):
     id: str = Field(min_length=1, max_length=64)
     name: str = Field(min_length=1, max_length=120)

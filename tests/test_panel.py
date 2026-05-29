@@ -408,6 +408,131 @@ def test_mirror_discovery_text_detects_existing_sources_and_replace_mode(panel_a
     assert replace["items"][0]["importable"] is True
 
 
+def test_mirror_preflight_reports_protection_and_does_not_mutate_state(panel_app):
+    client, _, state_path, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    state_path.write_text(json.dumps({"docker.io/library/busybox:v1.0.0": "sha256:old"}), encoding="utf-8")
+    client.post(
+        "/api/tag-protection",
+        json={"id": "release-tags", "name": "Release tags", "repo_pattern": "library/*", "tag_pattern": "v*", "environment": "*"},
+        headers=headers,
+    )
+
+    response = client.post(
+        "/api/mirrors/preflight",
+        json={
+            "source": "docker.io/library/busybox:v1.0.0",
+            "target": "localhost:5000/library/busybox:v1.0.0",
+            "environment": "prod",
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"]["status"] == "error"
+    assert any(item["name"] == "保护规则" and item["status"] == "error" for item in data["checks"])
+    assert any(item["name"] == "远程探测" and item["status"] == "warn" for item in data["checks"])
+    assert json.loads(state_path.read_text(encoding="utf-8")) == {"docker.io/library/busybox:v1.0.0": "sha256:old"}
+    assert not trigger_path.exists()
+    assert client.get("/api/sync-runs").json() == []
+
+
+def test_mirror_preflight_uses_explicit_credentials_without_secret_leak(panel_app):
+    client, _, _, _ = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    create = client.post(
+        "/api/credentials",
+        json={
+            "id": "dockerhub",
+            "name": "Docker Hub",
+            "registry_host": "docker.io",
+            "username": "alice",
+            "secret": "top-secret",
+            "scope": "source",
+        },
+        headers=headers,
+    )
+    assert create.status_code == 200
+
+    ok = client.post(
+        "/api/mirrors/preflight",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:nightly",
+            "source_credential_id": "dockerhub",
+        },
+        headers=headers,
+    ).json()
+
+    assert ok["summary"]["status"] == "warn"
+    assert any(item["name"] == "source 凭据" and item["status"] == "ok" for item in ok["checks"])
+    assert "top-secret" not in json.dumps(ok, ensure_ascii=False)
+
+    bad = client.post(
+        "/api/mirrors/preflight",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:nightly",
+            "target_credential_id": "dockerhub",
+        },
+        headers=headers,
+    ).json()
+    assert bad["summary"]["status"] == "error"
+    assert any(item["name"] == "target 凭据" and item["status"] == "error" for item in bad["checks"])
+    assert "top-secret" not in json.dumps(client.get("/api/audit-logs").json(), ensure_ascii=False)
+
+
+def test_mirror_preflight_batch_defaults_to_config_and_remote_probe(panel_app, monkeypatch):
+    client, _, state_path, trigger_path = panel_app
+    headers = {"Authorization": "Bearer test-token"}
+    client.post(
+        "/api/mirrors",
+        json={
+            "source": "docker.io/library/busybox:latest",
+            "target": "localhost:5000/library/busybox:nightly",
+        },
+        headers=headers,
+    )
+
+    import panel.main as panel_main
+
+    class FakeResponse:
+        def __init__(self, status_code=200, headers=None):
+            self.status_code = status_code
+            self.headers = headers or {}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None, auth=None):
+            if "/manifests/" in url:
+                assert headers["Accept"] == panel_main.MANIFEST_ACCEPT
+                return FakeResponse(200, {"Docker-Content-Digest": "sha256:new"})
+            assert url.endswith("/v2/")
+            return FakeResponse(200)
+
+    monkeypatch.setattr(panel_main.httpx, "AsyncClient", FakeAsyncClient)
+
+    response = client.post("/api/mirrors/preflight/batch", json={"check_remote": True}, headers=headers)
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["summary"] == {"total": 1, "ok": 0, "warn": 1, "error": 0}
+    checks = data["items"][0]["checks"]
+    assert any(item["name"] == "上游镜像" and item["status"] == "ok" for item in checks)
+    assert any(item["name"] == "目标 Registry" and item["status"] == "ok" for item in checks)
+    assert not state_path.exists()
+    assert not trigger_path.exists()
+
+
 def test_retry_failed_run_writes_sources_trigger(panel_app):
     client, _, _, trigger_path = panel_app
     headers = {"Authorization": "Bearer test-token"}

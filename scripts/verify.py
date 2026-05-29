@@ -355,6 +355,11 @@ def require_panel_features() -> None:
         "extract_kubernetes_images",
         "extract_text_images",
         "import_discovered_mirrors",
+        "build_mirror_preflight",
+        "preflight_mirror",
+        "preflight_mirrors_batch",
+        "probe_source_manifest",
+        "probe_registry_v2",
     ]:
         if name not in function_names:
             fail(f"panel/app.py missing function {name}")
@@ -443,6 +448,13 @@ def require_panel_features() -> None:
         "ephemeralContainers",
         "discover-import",
         "discover_import",
+        "MirrorPreflightIn",
+        "@app.post(\"/api/mirrors/preflight\"",
+        "@app.post(\"/api/mirrors/preflight/batch\"",
+        "预检只读执行",
+        "check_remote",
+        "上游 manifest",
+        "目标 Registry /v2/",
     ]
     missing = [snippet for snippet in required_snippets if snippet not in source]
     if missing:
@@ -586,7 +598,12 @@ def require_frontend_features() -> None:
         "/storage/stats/recalculate",
         "/mirrors/discover",
         "/mirrors/discover/import",
+        "/mirrors/preflight",
+        "/mirrors/preflight/batch",
         "镜像发现",
+        "同步预检",
+        "远程探测",
+        "批量预检",
         "Docker Compose",
         "Kubernetes YAML",
         "纯文本",
@@ -678,6 +695,11 @@ def require_tests_and_docs() -> None:
         "test_mirror_discovery_dry_run_from_compose_does_not_write_config",
         "test_mirror_discovery_imports_kubernetes_images_and_can_trigger_sync",
         "test_mirror_discovery_text_detects_existing_sources_and_replace_mode",
+        "/api/mirrors/preflight",
+        "/api/mirrors/preflight/batch",
+        "test_mirror_preflight_reports_protection_and_does_not_mutate_state",
+        "test_mirror_preflight_uses_explicit_credentials_without_secret_leak",
+        "test_mirror_preflight_batch_defaults_to_config_and_remote_probe",
     ]:
         if snippet not in tests:
             fail(f"tests missing coverage hint {snippet!r}")

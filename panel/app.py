@@ -33,6 +33,8 @@ from .schemas import (
     MirrorGroupIn,
     MirrorImportIn,
     MirrorIn,
+    MirrorPreflightBatchIn,
+    MirrorPreflightIn,
     RegistryIn,
     RetentionPolicyIn,
     ScheduledPushPolicyIn,
@@ -1629,6 +1631,199 @@ def build_discovery_preview(body: MirrorDiscoveryIn) -> dict:
     }
 
 
+def preflight_check(name: str, status: str, message: str, suggestion: str = "", details: dict | None = None) -> dict:
+    return {
+        "name": name,
+        "status": status,
+        "message": message,
+        "suggestion": suggestion,
+        "details": details or {},
+    }
+
+
+def summarize_preflight_checks(checks: list[dict]) -> dict:
+    status = "ok"
+    if any(item["status"] == "error" for item in checks):
+        status = "error"
+    elif any(item["status"] == "warn" for item in checks):
+        status = "warn"
+    return {
+        "status": status,
+        "ok": sum(1 for item in checks if item["status"] == "ok"),
+        "warn": sum(1 for item in checks if item["status"] == "warn"),
+        "error": sum(1 for item in checks if item["status"] == "error"),
+    }
+
+
+def credential_rows() -> list[dict]:
+    return db_rows(
+        """
+        SELECT id, name, registry_host, username, encrypted_secret, scope, created_at, updated_at
+        FROM credentials
+        ORDER BY registry_host, name
+        """
+    )
+
+
+def credential_allows(row: dict, purpose: str) -> bool:
+    return str(row.get("scope") or "both").lower() in {"both", purpose}
+
+
+def select_preflight_credential(image: str, purpose: str, explicit_id: str = "", credentials: list[dict] | None = None) -> tuple[dict | None, dict]:
+    rows = credentials if credentials is not None else credential_rows()
+    host = image_registry_host(image).lower()
+    explicit = (explicit_id or "").strip()
+    if explicit:
+        row = next((item for item in rows if item.get("id") == explicit), None)
+        if not row:
+            return None, preflight_check(f"{purpose} 凭据", "error", f"显式凭据 {explicit} 不存在", "检查镜像配置中的 credential id")
+        if not credential_allows(row, purpose):
+            return None, preflight_check(f"{purpose} 凭据", "error", f"凭据 {explicit} 不允许用于 {purpose}", "调整凭据 scope 或镜像配置")
+        try:
+            decrypt_secret(row["encrypted_secret"])
+        except HTTPException as exc:
+            return None, preflight_check(f"{purpose} 凭据", "error", f"凭据 {explicit} 无法解密: {exc.detail}", "检查 CREDENTIALS_SECRET_KEY 是否与备份来源一致")
+        return row, preflight_check(f"{purpose} 凭据", "ok", f"使用显式凭据 {explicit}", details={"credential_id": explicit, "host": row["registry_host"]})
+
+    row = next((item for item in rows if str(item.get("registry_host") or "").lower() == host and credential_allows(item, purpose)), None)
+    if not row:
+        return None, preflight_check(f"{purpose} 凭据", "warn", f"{host} 未配置 {purpose} 凭据，将尝试匿名访问", "私有仓库需要先在仓库凭据页保存凭据")
+    try:
+        decrypt_secret(row["encrypted_secret"])
+    except HTTPException as exc:
+        return None, preflight_check(f"{purpose} 凭据", "error", f"host 默认凭据 {row['id']} 无法解密: {exc.detail}", "检查 CREDENTIALS_SECRET_KEY 是否与备份来源一致")
+    return row, preflight_check(f"{purpose} 凭据", "ok", f"匹配 host 默认凭据 {row['id']}", details={"credential_id": row["id"], "host": row["registry_host"]})
+
+
+def preflight_auth(row: dict | None) -> tuple[str, str] | None:
+    if not row:
+        return None
+    return row["username"], decrypt_secret(row["encrypted_secret"])
+
+
+def registry_scheme_for_host(host: str) -> str:
+    lower = host.lower()
+    if lower.startswith("localhost") or lower.startswith("127.") or lower.startswith("registry:"):
+        return "http"
+    return "https"
+
+
+def source_manifest_endpoint(source: str) -> tuple[str, str, str]:
+    registry, repo, tag = split_image_ref(source)
+    host = registry or "docker.io"
+    if host == "docker.io":
+        return "https://registry-1.docker.io", repo, tag
+    return f"{registry_scheme_for_host(host)}://{host}", repo, tag
+
+
+async def probe_registry_v2(client: httpx.AsyncClient, registry_url: str, credential: dict | None = None) -> dict:
+    try:
+        response = await client.get(f"{registry_url.rstrip('/')}/v2/", auth=preflight_auth(credential))
+    except httpx.TimeoutException:
+        return preflight_check("目标 Registry", "error", "目标 Registry /v2/ 访问超时", "检查网络、反向代理和 Registry 服务")
+    except httpx.HTTPError as exc:
+        return preflight_check("目标 Registry", "error", f"目标 Registry 不可达: {exc.__class__.__name__}", "检查 registry_url 和容器网络")
+    if response.status_code in {200, 401}:
+        status = "ok" if response.status_code == 200 or not credential else "error"
+        message = "目标 Registry /v2/ 可访问" if status == "ok" else "目标 Registry 拒绝当前目标凭据"
+        return preflight_check("目标 Registry", status, message, details={"http_status": response.status_code})
+    if response.status_code == 403:
+        return preflight_check("目标 Registry", "error", "目标 Registry 返回 403，目标凭据权限不足", "检查 push 权限和反向代理认证", {"http_status": 403})
+    return preflight_check("目标 Registry", "error", f"目标 Registry 返回 HTTP {response.status_code}", "检查 Registry 服务状态", {"http_status": response.status_code})
+
+
+async def probe_source_manifest(client: httpx.AsyncClient, source: str, credential: dict | None = None) -> dict:
+    registry_url, repo, tag = source_manifest_endpoint(source)
+    try:
+        response = await client.get(
+            f"{registry_url}/v2/{repo}/manifests/{tag}",
+            headers={"Accept": MANIFEST_ACCEPT},
+            auth=preflight_auth(credential),
+        )
+    except httpx.TimeoutException:
+        return preflight_check("上游镜像", "error", "上游 manifest 访问超时", "检查网络或代理")
+    except httpx.HTTPError as exc:
+        return preflight_check("上游镜像", "error", f"上游 manifest 不可达: {exc.__class__.__name__}", "检查源 Registry、DNS 和代理")
+    if response.status_code == 200:
+        return preflight_check(
+            "上游镜像",
+            "ok",
+            "上游 manifest 可读取",
+            details={"registry": registry_url, "repo": repo, "tag": tag, "digest": response.headers.get("Docker-Content-Digest", "")},
+        )
+    if response.status_code == 401:
+        return preflight_check("上游镜像", "error", "上游 Registry 要求认证或凭据错误", "检查 source 凭据")
+    if response.status_code == 403:
+        return preflight_check("上游镜像", "error", "上游 Registry 返回 403，凭据权限不足", "检查 source 凭据权限")
+    if response.status_code == 404:
+        return preflight_check("上游镜像", "error", "上游镜像或 tag 不存在", "检查 image ref 和 tag")
+    return preflight_check("上游镜像", "error", f"上游 Registry 返回 HTTP {response.status_code}", "检查上游 Registry 状态")
+
+
+async def build_mirror_preflight(mirror_input: dict, check_remote: bool = False) -> dict:
+    started = datetime.now(timezone.utc)
+    checks: list[dict] = [
+        preflight_check("边界", "ok", "预检只读执行，不触发 skopeo copy，不写 digest 缓存或本地 Registry"),
+    ]
+    try:
+        mirror = normalize_mirror(mirror_input)
+    except HTTPException as exc:
+        checks.append(preflight_check("镜像配置", "error", str(exc.detail), "检查 source、target、group、registry 和凭据字段"))
+        summary = summarize_preflight_checks(checks)
+        return {"source": str(mirror_input.get("source") or ""), "target": str(mirror_input.get("target") or ""), "summary": summary, "checks": checks, "check_remote": check_remote}
+
+    checks.append(preflight_check("镜像配置", "ok", "source/target/tag 和分组字段格式合法"))
+    target_repo, target_tag = image_repo_tag(mirror["target"])
+    protection = protection_result(target_repo, target_tag, mirror.get("environment", ""))
+    if protection["protected"]:
+        checks.append(preflight_check("保护规则", "error", f"目标 tag 受保护: {', '.join(protection['reasons'])}", "同步会在 copy 前被阻断", {"protection": protection}))
+    else:
+        checks.append(preflight_check("保护规则", "ok", "目标 tag 未命中保护规则", details={"protection": protection}))
+    if target_tag == "latest":
+        checks.append(preflight_check("latest 策略", "warn", "目标 tag 是 latest；计划推送默认会阻断 latest，手动同步仍需谨慎", "如需计划推送 latest，必须显式 allow_latest"))
+
+    registry_url = get_registry_url()
+    target_host = image_registry_host(mirror["target"])
+    registry_host = urlparse(registry_url).netloc
+    if registry_host and target_host not in {registry_host, "localhost:5000", "registry:5000"}:
+        checks.append(preflight_check("目标地址", "warn", f"target host {target_host} 与 registry_url {registry_host} 不一致", "确认 sync 容器能解析目标 host"))
+    else:
+        checks.append(preflight_check("目标地址", "ok", f"目标地址将写入 {target_host}", details={"registry_url": registry_url}))
+
+    credentials = credential_rows()
+    source_credential, source_check = select_preflight_credential(mirror["source"], "source", mirror.get("source_credential_id", ""), credentials)
+    target_credential, target_check = select_preflight_credential(mirror["target"], "target", mirror.get("target_credential_id", ""), credentials)
+    checks.extend([source_check, target_check])
+
+    if check_remote:
+        async with httpx.AsyncClient(timeout=8) as client:
+            checks.append(await probe_source_manifest(client, mirror["source"], source_credential))
+            checks.append(await probe_registry_v2(client, registry_url, target_credential))
+    else:
+        checks.append(preflight_check("远程探测", "warn", "未启用 check_remote，已跳过上游 manifest 和目标 /v2/ 网络探测", "需要真实连通性检查时设置 check_remote=true"))
+
+    elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    summary = summarize_preflight_checks(checks)
+    return {
+        "source": mirror["source"],
+        "target": mirror["target"],
+        "environment": mirror["environment"],
+        "check_remote": check_remote,
+        "duration_ms": elapsed_ms,
+        "summary": summary,
+        "checks": checks,
+    }
+
+
+def summarize_preflight_results(items: list[dict]) -> dict:
+    return {
+        "total": len(items),
+        "ok": sum(1 for item in items if item["summary"]["status"] == "ok"),
+        "warn": sum(1 for item in items if item["summary"]["status"] == "warn"),
+        "error": sum(1 for item in items if item["summary"]["status"] == "error"),
+    }
+
+
 def latest_run() -> dict | None:
     return db_one(
         """
@@ -1821,6 +2016,8 @@ def list_mirrors():
                 "project": mirror["project"],
                 "environment": mirror["environment"],
                 "namespace": mirror["namespace"],
+                "source_credential_id": mirror["source_credential_id"],
+                "target_credential_id": mirror["target_credential_id"],
                 "digest": short,
                 "synced": bool(digest),
                 "last_status": last_item.get("status") if last_item else "",
@@ -1949,6 +2146,31 @@ def import_discovered_mirrors(body: MirrorDiscoveryIn):
         "trigger_sync": bool(body.trigger_sync),
         "summary": preview["summary"],
     }
+
+
+@app.post("/api/mirrors/preflight", dependencies=[Depends(require_write_token)])
+async def preflight_mirror(body: MirrorPreflightIn):
+    result = await build_mirror_preflight(body.model_dump(), body.check_remote)
+    audit_log(
+        "preflight",
+        "mirror",
+        result.get("source") or "unknown",
+        {"status": result["summary"]["status"], "check_remote": body.check_remote},
+    )
+    return result
+
+
+@app.post("/api/mirrors/preflight/batch", dependencies=[Depends(require_write_token)])
+async def preflight_mirrors_batch(body: MirrorPreflightBatchIn):
+    requested = [item.model_dump() for item in body.mirrors]
+    mirrors = requested if requested else valid_mirrors(load_config())
+    mirrors = mirrors[:500]
+    items = []
+    for mirror in mirrors:
+        items.append(await build_mirror_preflight(mirror, body.check_remote))
+    summary = summarize_preflight_results(items)
+    audit_log("preflight", "mirrors", "batch", {"summary": summary, "check_remote": body.check_remote})
+    return {"ok": summary["error"] == 0, "check_remote": body.check_remote, "summary": summary, "items": items}
 
 
 @app.post("/api/mirrors", dependencies=[Depends(require_write_token)])
